@@ -2,9 +2,13 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #include "rocksdb/utilities/sim_cache.h"
 #include <atomic>
+#include "monitoring/statistics.h"
+#include "port/port.h"
 
 namespace rocksdb {
 
@@ -18,7 +22,7 @@ class SimCacheImpl : public SimCache {
                int num_shard_bits)
       : cache_(cache),
         key_only_cache_(NewLRUCache(sim_capacity, num_shard_bits)),
-        lookup_times_(0),
+        miss_times_(0),
         hit_times_(0) {}
 
   virtual ~SimCacheImpl() {}
@@ -32,7 +36,7 @@ class SimCacheImpl : public SimCache {
 
   virtual Status Insert(const Slice& key, void* value, size_t charge,
                         void (*deleter)(const Slice& key, void* value),
-                        Handle** handle) override {
+                        Handle** handle, Priority priority) override {
     // The handle and value passed in are for real cache, so we pass nullptr
     // to key_only_cache_ for both instead. Also, the deleter function pointer
     // will be called by user to perform some external operation which should
@@ -41,33 +45,39 @@ class SimCacheImpl : public SimCache {
     Handle* h = key_only_cache_->Lookup(key);
     if (h == nullptr) {
       key_only_cache_->Insert(key, nullptr, charge,
-                              [](const Slice& k, void* v) {}, nullptr);
+                              [](const Slice& k, void* v) {}, nullptr,
+                              priority);
     } else {
       key_only_cache_->Release(h);
     }
-    return cache_->Insert(key, value, charge, deleter, handle);
+    return cache_->Insert(key, value, charge, deleter, handle, priority);
   }
 
-  virtual Handle* Lookup(const Slice& key) override {
-    inc_lookup_counter();
+  virtual Handle* Lookup(const Slice& key, Statistics* stats) override {
     Handle* h = key_only_cache_->Lookup(key);
     if (h != nullptr) {
       key_only_cache_->Release(h);
       inc_hit_counter();
+      RecordTick(stats, SIM_BLOCK_CACHE_HIT);
+    } else {
+      inc_miss_counter();
+      RecordTick(stats, SIM_BLOCK_CACHE_MISS);
     }
-    return cache_->Lookup(key);
+    return cache_->Lookup(key, stats);
   }
 
-  virtual void Release(Handle* handle) override { cache_->Release(handle); }
+  virtual bool Ref(Handle* handle) override { return cache_->Ref(handle); }
+
+  virtual bool Release(Handle* handle, bool force_erase = false) override {
+    return cache_->Release(handle, force_erase);
+  }
 
   virtual void Erase(const Slice& key) override {
     cache_->Erase(key);
     key_only_cache_->Erase(key);
   }
 
-  virtual void* Value(Handle* handle) override {
-    return reinterpret_cast<LRUHandle*>(handle)->value;
-  }
+  virtual void* Value(Handle* handle) override { return cache_->Value(handle); }
 
   virtual uint64_t NewId() override { return cache_->NewId(); }
 
@@ -80,7 +90,7 @@ class SimCacheImpl : public SimCache {
   virtual size_t GetUsage() const override { return cache_->GetUsage(); }
 
   virtual size_t GetUsage(Handle* handle) const override {
-    return reinterpret_cast<LRUHandle*>(handle)->charge;
+    return cache_->GetUsage(handle);
   }
 
   virtual size_t GetPinnedUsage() const override {
@@ -113,32 +123,53 @@ class SimCacheImpl : public SimCache {
     key_only_cache_->SetCapacity(capacity);
   }
 
-  virtual uint64_t get_lookup_counter() const override { return lookup_times_; }
-  virtual uint64_t get_hit_counter() const override { return hit_times_; }
-  virtual double get_hit_rate() const override {
-    return hit_times_ * 1.0f / lookup_times_;
+  virtual uint64_t get_miss_counter() const override {
+    return miss_times_.load(std::memory_order_relaxed);
   }
-  virtual void reset_counter() override { hit_times_ = lookup_times_ = 0; }
+
+  virtual uint64_t get_hit_counter() const override {
+    return hit_times_.load(std::memory_order_relaxed);
+  }
+
+  virtual void reset_counter() override {
+    miss_times_.store(0, std::memory_order_relaxed);
+    hit_times_.store(0, std::memory_order_relaxed);
+    SetTickerCount(stats_, SIM_BLOCK_CACHE_HIT, 0);
+    SetTickerCount(stats_, SIM_BLOCK_CACHE_MISS, 0);
+  }
 
   virtual std::string ToString() const override {
     std::string res;
-    res.append("SimCache LOOKUPs: " + std::to_string(get_lookup_counter()) +
-               "\n");
+    res.append("SimCache MISSes: " + std::to_string(get_miss_counter()) + "\n");
     res.append("SimCache HITs:    " + std::to_string(get_hit_counter()) + "\n");
-    char buff[100];
+    char buff[350];
+    auto lookups = get_miss_counter() + get_hit_counter();
     snprintf(buff, sizeof(buff), "SimCache HITRATE: %.2f%%\n",
-             get_hit_rate() * 100);
+             (lookups == 0 ? 0 : get_hit_counter() * 100.0f / lookups));
     res.append(buff);
     return res;
+  }
+
+  virtual std::string GetPrintableOptions() const override {
+    std::string ret;
+    ret.reserve(20000);
+    ret.append("    cache_options:\n");
+    ret.append(cache_->GetPrintableOptions());
+    ret.append("    sim_cache_options:\n");
+    ret.append(key_only_cache_->GetPrintableOptions());
+    return ret;
   }
 
  private:
   std::shared_ptr<Cache> cache_;
   std::shared_ptr<Cache> key_only_cache_;
-  std::atomic<uint64_t> lookup_times_;
+  std::atomic<uint64_t> miss_times_;
   std::atomic<uint64_t> hit_times_;
-  void inc_lookup_counter() { lookup_times_++; }
-  void inc_hit_counter() { hit_times_++; }
+  Statistics* stats_;
+  void inc_miss_counter() {
+    miss_times_.fetch_add(1, std::memory_order_relaxed);
+  }
+  void inc_hit_counter() { hit_times_.fetch_add(1, std::memory_order_relaxed); }
 };
 
 }  // end anonymous namespace

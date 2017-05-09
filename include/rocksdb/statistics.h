@@ -13,6 +13,8 @@
 #include <memory>
 #include <vector>
 
+#include "rocksdb/status.h"
+
 namespace rocksdb {
 
 /**
@@ -39,6 +41,8 @@ enum Tickers : uint32_t {
   BLOCK_CACHE_INDEX_MISS,
   // # of times cache hit when accessing index block from block cache.
   BLOCK_CACHE_INDEX_HIT,
+  // # of index blocks added to block cache.
+  BLOCK_CACHE_INDEX_ADD,
   // # of bytes of index blocks inserted into cache
   BLOCK_CACHE_INDEX_BYTES_INSERT,
   // # of bytes of index block erased from cache
@@ -47,6 +51,8 @@ enum Tickers : uint32_t {
   BLOCK_CACHE_FILTER_MISS,
   // # of times cache hit when accessing filter block from block cache.
   BLOCK_CACHE_FILTER_HIT,
+  // # of filter blocks added to block cache.
+  BLOCK_CACHE_FILTER_ADD,
   // # of bytes of bloom filter blocks inserted into cache
   BLOCK_CACHE_FILTER_BYTES_INSERT,
   // # of bytes of bloom filter block erased from cache
@@ -55,6 +61,10 @@ enum Tickers : uint32_t {
   BLOCK_CACHE_DATA_MISS,
   // # of times cache hit when accessing data block from block cache.
   BLOCK_CACHE_DATA_HIT,
+  // # of data blocks added to block cache.
+  BLOCK_CACHE_DATA_ADD,
+  // # of bytes of data blocks inserted into cache
+  BLOCK_CACHE_DATA_BYTES_INSERT,
   // # of bytes read from cache.
   BLOCK_CACHE_BYTES_READ,
   // # of bytes written into cache.
@@ -67,6 +77,11 @@ enum Tickers : uint32_t {
   PERSISTENT_CACHE_HIT,
   // # persistent cache miss
   PERSISTENT_CACHE_MISS,
+
+  // # total simulation block cache hits
+  SIM_BLOCK_CACHE_HIT,
+  // # total simulation block cache misses
+  SIM_BLOCK_CACHE_MISS,
 
   // # of memtable hits.
   MEMTABLE_HIT,
@@ -82,11 +97,15 @@ enum Tickers : uint32_t {
 
   /**
    * COMPACTION_KEY_DROP_* count the reasons for key drop during compaction
-   * There are 3 reasons currently.
+   * There are 4 reasons currently.
    */
   COMPACTION_KEY_DROP_NEWER_ENTRY,  // key was written with a newer value.
+                                    // Also includes keys dropped for range del.
   COMPACTION_KEY_DROP_OBSOLETE,     // The key is obsolete.
+  COMPACTION_KEY_DROP_RANGE_DEL,    // key was covered by a range tombstone.
   COMPACTION_KEY_DROP_USER,  // user compaction function has dropped the key.
+
+  COMPACTION_RANGE_DEL_DROP_OBSOLETE,  // all keys in range were deleted.
 
   // Number of keys written to the database via the Put and Write call's
   NUMBER_KEYS_WRITTEN,
@@ -139,7 +158,6 @@ enum Tickers : uint32_t {
   // written to storage because key does not exist
   NUMBER_FILTERED_DELETES,
   NUMBER_MERGE_FAILURES,
-  SEQUENCE_NUMBER,
 
   // number of times bloom was checked before creating iterator on a
   // file, and the number of times the check was useful in avoiding
@@ -179,6 +197,11 @@ enum Tickers : uint32_t {
   NUMBER_SUPERVERSION_ACQUIRES,
   NUMBER_SUPERVERSION_RELEASES,
   NUMBER_SUPERVERSION_CLEANUPS,
+
+  // # of compressions/decompressions executed
+  NUMBER_BLOCK_COMPRESSED,
+  NUMBER_BLOCK_DECOMPRESSED,
+
   NUMBER_BLOCK_NOT_COMPRESSED,
   MERGE_OPERATION_TOTAL_TIME,
   FILTER_OPERATION_TOTAL_TIME,
@@ -186,6 +209,17 @@ enum Tickers : uint32_t {
   // Row cache.
   ROW_CACHE_HIT,
   ROW_CACHE_MISS,
+
+  // Read amplification statistics.
+  // Read amplification can be calculated using this formula
+  // (READ_AMP_TOTAL_READ_BYTES / READ_AMP_ESTIMATE_USEFUL_BYTES)
+  //
+  // REQUIRES: ReadOptions::read_amp_bytes_per_bit to be enabled
+  READ_AMP_ESTIMATE_USEFUL_BYTES,  // Estimate of total bytes actually used.
+  READ_AMP_TOTAL_READ_BYTES,       // Total size of loaded data blocks.
+
+  // Number of refill intervals where rate limiter's bytes are fully consumed.
+  NUMBER_RATE_LIMITER_DRAINS,
 
   TICKER_ENUM_MAX
 };
@@ -199,18 +233,26 @@ const std::vector<std::pair<Tickers, std::string>> TickersNameMap = {
     {BLOCK_CACHE_ADD_FAILURES, "rocksdb.block.cache.add.failures"},
     {BLOCK_CACHE_INDEX_MISS, "rocksdb.block.cache.index.miss"},
     {BLOCK_CACHE_INDEX_HIT, "rocksdb.block.cache.index.hit"},
+    {BLOCK_CACHE_INDEX_ADD, "rocksdb.block.cache.index.add"},
     {BLOCK_CACHE_INDEX_BYTES_INSERT, "rocksdb.block.cache.index.bytes.insert"},
     {BLOCK_CACHE_INDEX_BYTES_EVICT, "rocksdb.block.cache.index.bytes.evict"},
     {BLOCK_CACHE_FILTER_MISS, "rocksdb.block.cache.filter.miss"},
     {BLOCK_CACHE_FILTER_HIT, "rocksdb.block.cache.filter.hit"},
+    {BLOCK_CACHE_FILTER_ADD, "rocksdb.block.cache.filter.add"},
     {BLOCK_CACHE_FILTER_BYTES_INSERT,
      "rocksdb.block.cache.filter.bytes.insert"},
     {BLOCK_CACHE_FILTER_BYTES_EVICT, "rocksdb.block.cache.filter.bytes.evict"},
     {BLOCK_CACHE_DATA_MISS, "rocksdb.block.cache.data.miss"},
     {BLOCK_CACHE_DATA_HIT, "rocksdb.block.cache.data.hit"},
+    {BLOCK_CACHE_DATA_ADD, "rocksdb.block.cache.data.add"},
+    {BLOCK_CACHE_DATA_BYTES_INSERT, "rocksdb.block.cache.data.bytes.insert"},
     {BLOCK_CACHE_BYTES_READ, "rocksdb.block.cache.bytes.read"},
     {BLOCK_CACHE_BYTES_WRITE, "rocksdb.block.cache.bytes.write"},
     {BLOOM_FILTER_USEFUL, "rocksdb.bloom.filter.useful"},
+    {PERSISTENT_CACHE_HIT, "rocksdb.persistent.cache.hit"},
+    {PERSISTENT_CACHE_MISS, "rocksdb.persistent.cache.miss"},
+    {SIM_BLOCK_CACHE_HIT, "rocksdb.sim.block.cache.hit"},
+    {SIM_BLOCK_CACHE_MISS, "rocksdb.sim.block.cache.miss"},
     {MEMTABLE_HIT, "rocksdb.memtable.hit"},
     {MEMTABLE_MISS, "rocksdb.memtable.miss"},
     {GET_HIT_L0, "rocksdb.l0.hit"},
@@ -218,7 +260,10 @@ const std::vector<std::pair<Tickers, std::string>> TickersNameMap = {
     {GET_HIT_L2_AND_UP, "rocksdb.l2andup.hit"},
     {COMPACTION_KEY_DROP_NEWER_ENTRY, "rocksdb.compaction.key.drop.new"},
     {COMPACTION_KEY_DROP_OBSOLETE, "rocksdb.compaction.key.drop.obsolete"},
+    {COMPACTION_KEY_DROP_RANGE_DEL, "rocksdb.compaction.key.drop.range_del"},
     {COMPACTION_KEY_DROP_USER, "rocksdb.compaction.key.drop.user"},
+    {COMPACTION_RANGE_DEL_DROP_OBSOLETE,
+     "rocksdb.compaction.range_del.drop.obsolete"},
     {NUMBER_KEYS_WRITTEN, "rocksdb.number.keys.written"},
     {NUMBER_KEYS_READ, "rocksdb.number.keys.read"},
     {NUMBER_KEYS_UPDATED, "rocksdb.number.keys.updated"},
@@ -246,7 +291,6 @@ const std::vector<std::pair<Tickers, std::string>> TickersNameMap = {
     {NUMBER_MULTIGET_BYTES_READ, "rocksdb.number.multiget.bytes.read"},
     {NUMBER_FILTERED_DELETES, "rocksdb.number.deletes.filtered"},
     {NUMBER_MERGE_FAILURES, "rocksdb.number.merge.failures"},
-    {SEQUENCE_NUMBER, "rocksdb.sequence.number"},
     {BLOOM_FILTER_PREFIX_CHECKED, "rocksdb.bloom.filter.prefix.checked"},
     {BLOOM_FILTER_PREFIX_USEFUL, "rocksdb.bloom.filter.prefix.useful"},
     {NUMBER_OF_RESEEKS_IN_ITERATION, "rocksdb.number.reseeks.iteration"},
@@ -260,20 +304,26 @@ const std::vector<std::pair<Tickers, std::string>> TickersNameMap = {
     {WAL_FILE_BYTES, "rocksdb.wal.bytes"},
     {WRITE_DONE_BY_SELF, "rocksdb.write.self"},
     {WRITE_DONE_BY_OTHER, "rocksdb.write.other"},
+    {WRITE_TIMEDOUT, "rocksdb.write.timeout"},
     {WRITE_WITH_WAL, "rocksdb.write.wal"},
-    {FLUSH_WRITE_BYTES, "rocksdb.flush.write.bytes"},
     {COMPACT_READ_BYTES, "rocksdb.compact.read.bytes"},
     {COMPACT_WRITE_BYTES, "rocksdb.compact.write.bytes"},
+    {FLUSH_WRITE_BYTES, "rocksdb.flush.write.bytes"},
     {NUMBER_DIRECT_LOAD_TABLE_PROPERTIES,
      "rocksdb.number.direct.load.table.properties"},
     {NUMBER_SUPERVERSION_ACQUIRES, "rocksdb.number.superversion_acquires"},
     {NUMBER_SUPERVERSION_RELEASES, "rocksdb.number.superversion_releases"},
     {NUMBER_SUPERVERSION_CLEANUPS, "rocksdb.number.superversion_cleanups"},
+    {NUMBER_BLOCK_COMPRESSED, "rocksdb.number.block.compressed"},
+    {NUMBER_BLOCK_DECOMPRESSED, "rocksdb.number.block.decompressed"},
     {NUMBER_BLOCK_NOT_COMPRESSED, "rocksdb.number.block.not_compressed"},
     {MERGE_OPERATION_TOTAL_TIME, "rocksdb.merge.operation.time.nanos"},
     {FILTER_OPERATION_TOTAL_TIME, "rocksdb.filter.operation.time.nanos"},
     {ROW_CACHE_HIT, "rocksdb.row.cache.hit"},
     {ROW_CACHE_MISS, "rocksdb.row.cache.miss"},
+    {READ_AMP_ESTIMATE_USEFUL_BYTES, "rocksdb.read.amp.estimate.useful.bytes"},
+    {READ_AMP_TOTAL_READ_BYTES, "rocksdb.read.amp.total.read.bytes"},
+    {NUMBER_RATE_LIMITER_DRAINS, "rocksdb.number.rate_limiter.drains"},
 };
 
 /**
@@ -313,6 +363,14 @@ enum Histograms : uint32_t {
   BYTES_PER_READ,
   BYTES_PER_WRITE,
   BYTES_PER_MULTIGET,
+
+  // number of bytes compressed/decompressed
+  // number of bytes is when uncompressed; i.e. before/after respectively
+  BYTES_COMPRESSED,
+  BYTES_DECOMPRESSED,
+  COMPRESSION_TIMES_NANOS,
+  DECOMPRESSION_TIMES_NANOS,
+
   HISTOGRAM_ENUM_MAX,  // TODO(ldemailly): enforce HistogramsNameMap match
 };
 
@@ -343,6 +401,10 @@ const std::vector<std::pair<Histograms, std::string>> HistogramsNameMap = {
     {BYTES_PER_READ, "rocksdb.bytes.per.read"},
     {BYTES_PER_WRITE, "rocksdb.bytes.per.write"},
     {BYTES_PER_MULTIGET, "rocksdb.bytes.per.multiget"},
+    {BYTES_COMPRESSED, "rocksdb.bytes.compressed"},
+    {BYTES_DECOMPRESSED, "rocksdb.bytes.decompressed"},
+    {COMPRESSION_TIMES_NANOS, "rocksdb.compression.times.nanos"},
+    {DECOMPRESSION_TIMES_NANOS, "rocksdb.decompression.times.nanos"},
 };
 
 struct HistogramData {
@@ -351,9 +413,15 @@ struct HistogramData {
   double percentile99;
   double average;
   double standard_deviation;
+  // zero-initialize new members since old Statistics::histogramData()
+  // implementations won't write them.
+  double max = 0.0;
 };
 
 enum StatsLevel {
+  // Collect all stats except time inside mutex lock AND time spent on
+  // compression.
+  kExceptDetailedTimers,
   // Collect all stats except the counters requiring to get time inside the
   // mutex lock.
   kExceptTimeForMutex,
@@ -374,7 +442,13 @@ class Statistics {
   virtual std::string getHistogramString(uint32_t type) const { return ""; }
   virtual void recordTick(uint32_t tickerType, uint64_t count = 0) = 0;
   virtual void setTickerCount(uint32_t tickerType, uint64_t count) = 0;
+  virtual uint64_t getAndResetTickerCount(uint32_t tickerType) = 0;
   virtual void measureTime(uint32_t histogramType, uint64_t time) = 0;
+
+  // Resets all ticker and histogram stats
+  virtual Status Reset() {
+    return Status::NotSupported("Not implemented");
+  }
 
   // String representation of the statistic object.
   virtual std::string ToString() const {
@@ -387,7 +461,7 @@ class Statistics {
     return type < HISTOGRAM_ENUM_MAX;
   }
 
-  StatsLevel stats_level_ = kExceptTimeForMutex;
+  StatsLevel stats_level_ = kExceptDetailedTimers;
 };
 
 // Create a concrete DBStatistics object

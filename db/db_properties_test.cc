@@ -34,6 +34,7 @@ TEST_F(DBPropertiesTest, Empty) {
     Options options;
     options.env = env_;
     options.write_buffer_size = 100000;  // Small write buffer
+    options.allow_concurrent_memtable_write = false;
     options = CurrentOptions(options);
     CreateAndReopenWithCF({"pikachu"}, options);
 
@@ -236,7 +237,7 @@ void GetExpectedTableProperties(TableProperties* expected_tp,
   expected_tp->data_size =
       kTableCount * (kKeysPerTable * (kKeySize + 8 + kValueSize));
   expected_tp->index_size =
-      expected_tp->num_data_blocks * (kAvgSuccessorSize + 12);
+      expected_tp->num_data_blocks * (kAvgSuccessorSize + 8);
   expected_tp->filter_size =
       kTableCount * (kKeysPerTable * kBloomBitsPerKey / 8);
 }
@@ -341,7 +342,7 @@ TEST_F(DBPropertiesTest, ReadLatencyHistogramByLevel) {
   BlockBasedTableOptions table_options;
   table_options.no_block_cache = true;
 
-  DestroyAndReopen(options);
+  CreateAndReopenWithCF({"pikachu"}, options);
   int key_index = 0;
   Random rnd(301);
   for (int num = 0; num < 8; num++) {
@@ -358,25 +359,26 @@ TEST_F(DBPropertiesTest, ReadLatencyHistogramByLevel) {
   for (int key = 0; key < key_index; key++) {
     Get(Key(key));
   }
-  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.dbstats", &prop));
+  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.cfstats", &prop));
   ASSERT_NE(std::string::npos, prop.find("** Level 0 read latency histogram"));
   ASSERT_NE(std::string::npos, prop.find("** Level 1 read latency histogram"));
   ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
 
   // Reopen and issue Get(). See thee latency tracked
-  Reopen(options);
+  ReopenWithColumnFamilies({"default", "pikachu"}, options);
   dbfull()->TEST_WaitForCompact();
   for (int key = 0; key < key_index; key++) {
     Get(Key(key));
   }
-  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.dbstats", &prop));
+  ASSERT_TRUE(dbfull()->GetProperty(dbfull()->DefaultColumnFamily(),
+                                    "rocksdb.cf-file-histogram", &prop));
   ASSERT_NE(std::string::npos, prop.find("** Level 0 read latency histogram"));
   ASSERT_NE(std::string::npos, prop.find("** Level 1 read latency histogram"));
   ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
 
   // Reopen and issue iterating. See thee latency tracked
-  Reopen(options);
-  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.dbstats", &prop));
+  ReopenWithColumnFamilies({"default", "pikachu"}, options);
+  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.cf-file-histogram", &prop));
   ASSERT_EQ(std::string::npos, prop.find("** Level 0 read latency histogram"));
   ASSERT_EQ(std::string::npos, prop.find("** Level 1 read latency histogram"));
   ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
@@ -385,24 +387,50 @@ TEST_F(DBPropertiesTest, ReadLatencyHistogramByLevel) {
     for (iter->Seek(Key(0)); iter->Valid(); iter->Next()) {
     }
   }
-  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.dbstats", &prop));
+  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.cf-file-histogram", &prop));
   ASSERT_NE(std::string::npos, prop.find("** Level 0 read latency histogram"));
   ASSERT_NE(std::string::npos, prop.find("** Level 1 read latency histogram"));
   ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
 
+  // CF 1 should show no histogram.
+  ASSERT_TRUE(
+      dbfull()->GetProperty(handles_[1], "rocksdb.cf-file-histogram", &prop));
+  ASSERT_EQ(std::string::npos, prop.find("** Level 0 read latency histogram"));
+  ASSERT_EQ(std::string::npos, prop.find("** Level 1 read latency histogram"));
+  ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
+  // put something and read it back , CF 1 should show histogram.
+  Put(1, "foo", "bar");
+  Flush(1);
+  dbfull()->TEST_WaitForCompact();
+  ASSERT_EQ("bar", Get(1, "foo"));
+
+  ASSERT_TRUE(
+      dbfull()->GetProperty(handles_[1], "rocksdb.cf-file-histogram", &prop));
+  ASSERT_NE(std::string::npos, prop.find("** Level 0 read latency histogram"));
+  ASSERT_EQ(std::string::npos, prop.find("** Level 1 read latency histogram"));
+  ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
+
   // options.max_open_files preloads table readers.
   options.max_open_files = -1;
-  Reopen(options);
-  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.dbstats", &prop));
+  ReopenWithColumnFamilies({"default", "pikachu"}, options);
+  ASSERT_TRUE(dbfull()->GetProperty(dbfull()->DefaultColumnFamily(),
+                                    "rocksdb.cf-file-histogram", &prop));
   ASSERT_NE(std::string::npos, prop.find("** Level 0 read latency histogram"));
   ASSERT_NE(std::string::npos, prop.find("** Level 1 read latency histogram"));
   ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
   for (int key = 0; key < key_index; key++) {
     Get(Key(key));
   }
-  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.dbstats", &prop));
+  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.cfstats", &prop));
   ASSERT_NE(std::string::npos, prop.find("** Level 0 read latency histogram"));
   ASSERT_NE(std::string::npos, prop.find("** Level 1 read latency histogram"));
+  ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
+
+  // Clear internal stats
+  dbfull()->ResetStats();
+  ASSERT_TRUE(dbfull()->GetProperty("rocksdb.cfstats", &prop));
+  ASSERT_EQ(std::string::npos, prop.find("** Level 0 read latency histogram"));
+  ASSERT_EQ(std::string::npos, prop.find("** Level 1 read latency histogram"));
   ASSERT_EQ(std::string::npos, prop.find("** Level 2 read latency histogram"));
 }
 
@@ -491,6 +519,7 @@ TEST_F(DBPropertiesTest, NumImmutableMemTable) {
 
     std::string big_value(1000000 * 2, 'x');
     std::string num;
+    uint64_t value;
     SetPerfLevel(kEnableTime);
     ASSERT_TRUE(GetPerfLevel() == kEnableTime);
 
@@ -555,11 +584,11 @@ TEST_F(DBPropertiesTest, NumImmutableMemTable) {
     ASSERT_TRUE(dbfull()->GetProperty(
         handles_[1], DB::Properties::kNumImmutableMemTableFlushed, &num));
     ASSERT_EQ(num, "3");
-    ASSERT_TRUE(dbfull()->GetProperty(
-        handles_[1], "rocksdb.cur-size-active-mem-table", &num));
-    // "192" is the size of the metadata of an empty skiplist, this would
+    ASSERT_TRUE(dbfull()->GetIntProperty(
+        handles_[1], "rocksdb.cur-size-active-mem-table", &value));
+    // "192" is the size of the metadata of two empty skiplists, this would
     // break if we change the default skiplist implementation
-    ASSERT_EQ(num, "192");
+    ASSERT_GE(value, 192);
 
     uint64_t int_num;
     uint64_t base_total_size;
@@ -594,7 +623,8 @@ TEST_F(DBPropertiesTest, NumImmutableMemTable) {
   } while (ChangeCompactOptions());
 }
 
-TEST_F(DBPropertiesTest, GetProperty) {
+// TODO(techdept) : Disabled flaky test #12863555
+TEST_F(DBPropertiesTest, DISABLED_GetProperty) {
   // Set sizes to both background thread pool to be 1 and block them.
   env_->SetBackgroundThreads(1, Env::HIGH);
   env_->SetBackgroundThreads(1, Env::LOW);
@@ -1153,6 +1183,7 @@ TEST_F(DBPropertiesTest, TablePropertiesNeedCompactTest) {
   options.max_bytes_for_level_multiplier = 4;
   options.soft_pending_compaction_bytes_limit = 1024 * 1024;
   options.num_levels = 8;
+  options.env = env_;
 
   std::shared_ptr<TablePropertiesCollectorFactory> collector_factory =
       std::make_shared<CountingDeleteTabPropCollectorFactory>();
@@ -1224,6 +1255,7 @@ TEST_F(DBPropertiesTest, NeedCompactHintPersistentTest) {
   options.level0_slowdown_writes_trigger = 10;
   options.level0_stop_writes_trigger = 10;
   options.disable_auto_compactions = true;
+  options.env = env_;
 
   std::shared_ptr<TablePropertiesCollectorFactory> collector_factory =
       std::make_shared<CountingDeleteTabPropCollectorFactory>();

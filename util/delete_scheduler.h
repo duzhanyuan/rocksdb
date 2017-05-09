@@ -2,14 +2,19 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #pragma once
+
+#ifndef ROCKSDB_LITE
 
 #include <map>
 #include <queue>
 #include <string>
 #include <thread>
 
+#include "monitoring/instrumented_mutex.h"
 #include "port/port.h"
 
 #include "rocksdb/status.h"
@@ -36,7 +41,12 @@ class DeleteScheduler {
   ~DeleteScheduler();
 
   // Return delete rate limit in bytes per second
-  int64_t GetRateBytesPerSecond() { return rate_bytes_per_sec_; }
+  int64_t GetRateBytesPerSecond() { return rate_bytes_per_sec_.load(); }
+
+  // Set delete rate limit in bytes per second
+  void SetRateBytesPerSecond(int64_t bytes_per_sec) {
+    return rate_bytes_per_sec_.store(bytes_per_sec);
+  }
 
   // Move file to trash directory and schedule it's deletion
   Status DeleteFile(const std::string& fname);
@@ -61,9 +71,9 @@ class DeleteScheduler {
   // Path to the trash directory
   std::string trash_dir_;
   // Maximum number of bytes that should be deleted per second
-  int64_t rate_bytes_per_sec_;
+  std::atomic<int64_t> rate_bytes_per_sec_;
   // Mutex to protect queue_, pending_files_, bg_errors_, closing_
-  port::Mutex mu_;
+  InstrumentedMutex mu_;
   // Queue of files in trash that need to be deleted
   std::queue<std::string> queue_;
   // Number of files in trash that are waiting to be deleted
@@ -76,14 +86,16 @@ class DeleteScheduler {
   //    - pending_files_ value change from 0 => 1
   //    - pending_files_ value change from 1 => 0
   //    - closing_ value is set to true
-  port::CondVar cv_;
+  InstrumentedCondVar cv_;
   // Background thread running BackgroundEmptyTrash
-  std::unique_ptr<std::thread> bg_thread_;
+  std::unique_ptr<port::Thread> bg_thread_;
   // Mutex to protect threads from file name conflicts
-  port::Mutex file_move_mu_;
+  InstrumentedMutex file_move_mu_;
   Logger* info_log_;
   SstFileManagerImpl* sst_file_manager_;
   static const uint64_t kMicrosInSecond = 1000 * 1000LL;
 };
 
 }  // namespace rocksdb
+
+#endif  // ROCKSDB_LITE

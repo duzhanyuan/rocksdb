@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #ifndef ROCKSDB_LITE
 
@@ -86,9 +88,11 @@ Status OptimisticTransactionImpl::Rollback() {
 }
 
 // Record this key so that we can check it for conflicts at commit time.
+//
+// 'exclusive' is unused for OptimisticTransaction.
 Status OptimisticTransactionImpl::TryLock(ColumnFamilyHandle* column_family,
                                           const Slice& key, bool read_only,
-                                          bool untracked) {
+                                          bool exclusive, bool untracked) {
   if (untracked) {
     return Status::OK();
   }
@@ -105,7 +109,7 @@ Status OptimisticTransactionImpl::TryLock(ColumnFamilyHandle* column_family,
 
   std::string key_str = key.ToString();
 
-  TrackKey(cfh_id, key_str, seq, read_only);
+  TrackKey(cfh_id, key_str, seq, read_only, exclusive);
 
   // Always return OK. Confilct checking will happen at commit time.
   return Status::OK();

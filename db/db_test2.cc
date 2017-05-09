@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -11,6 +13,7 @@
 #include <functional>
 
 #include "db/db_test_util.h"
+#include "port/port.h"
 #include "port/stack_trace.h"
 #include "rocksdb/persistent_cache.h"
 #include "rocksdb/wal_filter.h"
@@ -145,6 +148,22 @@ TEST_F(DBTest2, CacheIndexAndFilterWithDBRestart) {
   value = Get(1, "a");
 }
 
+TEST_F(DBTest2, MaxSuccessiveMergesChangeWithDBRecovery) {
+  Options options = CurrentOptions();
+  options.create_if_missing = true;
+  options.statistics = rocksdb::CreateDBStatistics();
+  options.max_successive_merges = 3;
+  options.merge_operator = MergeOperators::CreatePutOperator();
+  options.disable_auto_compactions = true;
+  DestroyAndReopen(options);
+  Put("poi", "Finch");
+  db_->Merge(WriteOptions(), "poi", "Reese");
+  db_->Merge(WriteOptions(), "poi", "Shaw");
+  db_->Merge(WriteOptions(), "poi", "Root");
+  options.max_successive_merges = 2;
+  Reopen(options);
+}
+
 #ifndef ROCKSDB_LITE
 class DBTestSharedWriteBufferAcrossCFs
     : public DBTestBase,
@@ -166,19 +185,32 @@ TEST_P(DBTestSharedWriteBufferAcrossCFs, SharedWriteBufferAcrossCFs) {
   options.write_buffer_size = 500000;  // this is never hit
   CreateAndReopenWithCF({"pikachu", "dobrynia", "nikitich"}, options);
 
-  // Trigger a flush on CF "nikitich"
-  ASSERT_OK(Put(0, Key(1), DummyString(1)));
-  ASSERT_OK(Put(1, Key(1), DummyString(1)));
-  ASSERT_OK(Put(3, Key(1), DummyString(90000)));
-  ASSERT_OK(Put(2, Key(2), DummyString(20000)));
-  ASSERT_OK(Put(2, Key(1), DummyString(1)));
+  WriteOptions wo;
+  wo.disableWAL = true;
+
+  // Create some data and flush "default" and "nikitich" so that they
+  // are newer CFs created.
+  ASSERT_OK(Put(3, Key(1), DummyString(1), wo));
+  Flush(3);
+  ASSERT_OK(Put(3, Key(1), DummyString(1), wo));
+  ASSERT_OK(Put(0, Key(1), DummyString(1), wo));
+  Flush(0);
+  ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
+            static_cast<uint64_t>(1));
+  ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "nikitich"),
+            static_cast<uint64_t>(1));
+
+  ASSERT_OK(Put(3, Key(1), DummyString(30000), wo));
+  ASSERT_OK(Put(0, Key(1), DummyString(60000), wo));
+  ASSERT_OK(Put(2, Key(1), DummyString(1), wo));
+  // No flush should trigger
   dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[3]);
   {
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
-              static_cast<uint64_t>(0));
+              static_cast<uint64_t>(1));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "pikachu"),
               static_cast<uint64_t>(0));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "dobrynia"),
@@ -187,98 +219,84 @@ TEST_P(DBTestSharedWriteBufferAcrossCFs, SharedWriteBufferAcrossCFs) {
               static_cast<uint64_t>(1));
   }
 
-  // "dobrynia": 20KB
-  // Flush 'dobrynia'
-  ASSERT_OK(Put(3, Key(2), DummyString(40000)));
-  ASSERT_OK(Put(2, Key(2), DummyString(70000)));
-  ASSERT_OK(Put(0, Key(1), DummyString(1)));
-  dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
-  dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
-  dbfull()->TEST_WaitForFlushMemTable(handles_[3]);
-  {
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
-              static_cast<uint64_t>(0));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "pikachu"),
-              static_cast<uint64_t>(0));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "dobrynia"),
-              static_cast<uint64_t>(1));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "nikitich"),
-              static_cast<uint64_t>(1));
-  }
-
-  // "nikitich" still has data of 80KB
-  // Inserting Data in "dobrynia" triggers "nikitich" flushing.
-  ASSERT_OK(Put(3, Key(2), DummyString(40000)));
-  ASSERT_OK(Put(2, Key(2), DummyString(40000)));
-  ASSERT_OK(Put(0, Key(1), DummyString(1)));
-  dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
-  dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
-  dbfull()->TEST_WaitForFlushMemTable(handles_[3]);
-  {
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
-              static_cast<uint64_t>(0));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "pikachu"),
-              static_cast<uint64_t>(0));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "dobrynia"),
-              static_cast<uint64_t>(1));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "nikitich"),
-              static_cast<uint64_t>(2));
-  }
-
-  // "dobrynia" still has 40KB
-  ASSERT_OK(Put(1, Key(2), DummyString(20000)));
-  ASSERT_OK(Put(0, Key(1), DummyString(10000)));
-  ASSERT_OK(Put(0, Key(1), DummyString(1)));
+  // Trigger a flush. Flushing "nikitich".
+  ASSERT_OK(Put(3, Key(2), DummyString(30000), wo));
+  ASSERT_OK(Put(0, Key(1), DummyString(1), wo));
   dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[3]);
-  // This should triggers no flush
   {
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
-              static_cast<uint64_t>(0));
+              static_cast<uint64_t>(1));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "pikachu"),
               static_cast<uint64_t>(0));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "dobrynia"),
-              static_cast<uint64_t>(1));
+              static_cast<uint64_t>(0));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "nikitich"),
               static_cast<uint64_t>(2));
   }
 
-  // "default": 10KB, "pikachu": 20KB, "dobrynia": 40KB
-  ASSERT_OK(Put(1, Key(2), DummyString(40000)));
-  ASSERT_OK(Put(0, Key(1), DummyString(1)));
+  // Without hitting the threshold, no flush should trigger.
+  ASSERT_OK(Put(2, Key(1), DummyString(30000), wo));
+  ASSERT_OK(Put(2, Key(1), DummyString(1), wo));
+  ASSERT_OK(Put(2, Key(1), DummyString(1), wo));
   dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[3]);
-  // This should triggers flush of "pikachu"
   {
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
-              static_cast<uint64_t>(0));
+              static_cast<uint64_t>(1));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "pikachu"),
-              static_cast<uint64_t>(1));
+              static_cast<uint64_t>(0));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "dobrynia"),
-              static_cast<uint64_t>(1));
+              static_cast<uint64_t>(0));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "nikitich"),
               static_cast<uint64_t>(2));
   }
 
-  // "default": 10KB, "dobrynia": 40KB
-  // Some remaining writes so 'default', 'dobrynia' and 'nikitich' flush on
-  // closure.
-  ASSERT_OK(Put(3, Key(1), DummyString(1)));
-  ReopenWithColumnFamilies({"default", "pikachu", "dobrynia", "nikitich"},
-                           options);
+  // Hit the write buffer limit again. "default"
+  // will have been flushed.
+  ASSERT_OK(Put(2, Key(2), DummyString(10000), wo));
+  ASSERT_OK(Put(3, Key(1), DummyString(1), wo));
+  ASSERT_OK(Put(0, Key(1), DummyString(1), wo));
+  ASSERT_OK(Put(0, Key(1), DummyString(1), wo));
+  ASSERT_OK(Put(0, Key(1), DummyString(1), wo));
+  dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
+  dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
+  dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
+  dbfull()->TEST_WaitForFlushMemTable(handles_[3]);
   {
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
-              static_cast<uint64_t>(1));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "pikachu"),
-              static_cast<uint64_t>(1));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "dobrynia"),
               static_cast<uint64_t>(2));
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "pikachu"),
+              static_cast<uint64_t>(0));
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "dobrynia"),
+              static_cast<uint64_t>(0));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "nikitich"),
-              static_cast<uint64_t>(3));
+              static_cast<uint64_t>(2));
+  }
+
+  // Trigger another flush. This time "dobrynia". "pikachu" should not
+  // be flushed, althrough it was never flushed.
+  ASSERT_OK(Put(1, Key(1), DummyString(1), wo));
+  ASSERT_OK(Put(2, Key(1), DummyString(80000), wo));
+  ASSERT_OK(Put(1, Key(1), DummyString(1), wo));
+  ASSERT_OK(Put(2, Key(1), DummyString(1), wo));
+  dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
+  dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
+  dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
+  dbfull()->TEST_WaitForFlushMemTable(handles_[3]);
+  {
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
+              static_cast<uint64_t>(2));
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "pikachu"),
+              static_cast<uint64_t>(0));
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "dobrynia"),
+              static_cast<uint64_t>(1));
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "nikitich"),
+              static_cast<uint64_t>(2));
   }
 }
 
@@ -297,23 +315,38 @@ TEST_F(DBTest2, SharedWriteBufferLimitAcrossDB) {
   ASSERT_OK(DB::Open(options, dbname2, &db2));
 
   WriteOptions wo;
+  wo.disableWAL = true;
 
   // Trigger a flush on cf2
-  ASSERT_OK(Put(0, Key(1), DummyString(1)));
-  ASSERT_OK(Put(1, Key(1), DummyString(1)));
-  ASSERT_OK(Put(2, Key(1), DummyString(90000)));
+  ASSERT_OK(Put(2, Key(1), DummyString(70000), wo));
+  ASSERT_OK(Put(0, Key(1), DummyString(20000), wo));
 
   // Insert to DB2
   ASSERT_OK(db2->Put(wo, Key(2), DummyString(20000)));
 
-  ASSERT_OK(Put(2, Key(1), DummyString(1)));
+  ASSERT_OK(Put(2, Key(1), DummyString(1), wo));
   dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
   static_cast<DBImpl*>(db2)->TEST_WaitForFlushMemTable();
   {
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default") +
+                  GetNumberOfSstFilesForColumnFamily(db_, "cf1") +
+                  GetNumberOfSstFilesForColumnFamily(db_, "cf2"),
+              static_cast<uint64_t>(1));
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db2, "default"),
               static_cast<uint64_t>(0));
+  }
+
+  // Triggering to flush another CF in DB1
+  ASSERT_OK(db2->Put(wo, Key(2), DummyString(70000)));
+  ASSERT_OK(Put(2, Key(1), DummyString(1), wo));
+  dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
+  dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
+  dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
+  {
+    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
+              static_cast<uint64_t>(1));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "cf1"),
               static_cast<uint64_t>(0));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "cf2"),
@@ -322,9 +355,8 @@ TEST_F(DBTest2, SharedWriteBufferLimitAcrossDB) {
               static_cast<uint64_t>(0));
   }
 
-  // db2: 20KB
-  ASSERT_OK(db2->Put(wo, Key(2), DummyString(40000)));
-  ASSERT_OK(db2->Put(wo, Key(3), DummyString(70000)));
+  // Triggering flush in DB2.
+  ASSERT_OK(db2->Put(wo, Key(3), DummyString(40000)));
   ASSERT_OK(db2->Put(wo, Key(1), DummyString(1)));
   dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
   dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
@@ -332,31 +364,11 @@ TEST_F(DBTest2, SharedWriteBufferLimitAcrossDB) {
   static_cast<DBImpl*>(db2)->TEST_WaitForFlushMemTable();
   {
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
-              static_cast<uint64_t>(0));
+              static_cast<uint64_t>(1));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "cf1"),
               static_cast<uint64_t>(0));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "cf2"),
               static_cast<uint64_t>(1));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db2, "default"),
-              static_cast<uint64_t>(1));
-  }
-
-  //
-  // Inserting Data in db2 and db_ triggers flushing in db_.
-  ASSERT_OK(db2->Put(wo, Key(3), DummyString(70000)));
-  ASSERT_OK(Put(2, Key(2), DummyString(45000)));
-  ASSERT_OK(Put(0, Key(1), DummyString(1)));
-  dbfull()->TEST_WaitForFlushMemTable(handles_[0]);
-  dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
-  dbfull()->TEST_WaitForFlushMemTable(handles_[2]);
-  static_cast<DBImpl*>(db2)->TEST_WaitForFlushMemTable();
-  {
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "default"),
-              static_cast<uint64_t>(0));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "cf1"),
-              static_cast<uint64_t>(0));
-    ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db_, "cf2"),
-              static_cast<uint64_t>(2));
     ASSERT_EQ(GetNumberOfSstFilesForColumnFamily(db2, "default"),
               static_cast<uint64_t>(1));
   }
@@ -940,6 +952,7 @@ TEST_F(DBTest2, PresetCompressionDict) {
   const int kNumL0Files = 5;
 
   Options options;
+  options.allow_concurrent_memtable_write = false;
   options.arena_block_size = kBlockSizeBytes;
   options.compaction_style = kCompactionStyleUniversal;
   options.create_if_missing = true;
@@ -961,9 +974,9 @@ TEST_F(DBTest2, PresetCompressionDict) {
   compression_types.push_back(kLZ4Compression);
   compression_types.push_back(kLZ4HCCompression);
 #endif                          // LZ4_VERSION_NUMBER >= 10400
-#if ZSTD_VERSION_NUMBER >= 500  // v0.5.0+
-  compression_types.push_back(kZSTDNotFinalCompression);
-#endif  // ZSTD_VERSION_NUMBER >= 500
+  if (ZSTD_Supported()) {
+    compression_types.push_back(kZSTD);
+  }
 
   for (auto compression_type : compression_types) {
     options.compression = compression_type;
@@ -1210,6 +1223,40 @@ class PinL0IndexAndFilterBlocksTest : public DBTestBase,
   PinL0IndexAndFilterBlocksTest() : DBTestBase("/db_pin_l0_index_bloom_test") {}
   virtual void SetUp() override { infinite_max_files_ = GetParam(); }
 
+  void CreateTwoLevels(Options* options, bool close_afterwards) {
+    if (infinite_max_files_) {
+      options->max_open_files = -1;
+    }
+    options->create_if_missing = true;
+    options->statistics = rocksdb::CreateDBStatistics();
+    BlockBasedTableOptions table_options;
+    table_options.cache_index_and_filter_blocks = true;
+    table_options.pin_l0_filter_and_index_blocks_in_cache = true;
+    table_options.filter_policy.reset(NewBloomFilterPolicy(20));
+    options->table_factory.reset(new BlockBasedTableFactory(table_options));
+    CreateAndReopenWithCF({"pikachu"}, *options);
+
+    Put(1, "a", "begin");
+    Put(1, "z", "end");
+    ASSERT_OK(Flush(1));
+    // move this table to L1
+    dbfull()->TEST_CompactRange(0, nullptr, nullptr, handles_[1]);
+
+    // reset block cache
+    table_options.block_cache = NewLRUCache(64 * 1024);
+    options->table_factory.reset(NewBlockBasedTableFactory(table_options));
+    TryReopenWithColumnFamilies({"default", "pikachu"}, *options);
+    // create new table at L0
+    Put(1, "a2", "begin2");
+    Put(1, "z2", "end2");
+    ASSERT_OK(Flush(1));
+
+    if (close_afterwards) {
+      Close();  // This ensures that there is no ref to block cache entries
+    }
+    table_options.block_cache->EraseUnRefEntries();
+  }
+
   bool infinite_max_files_;
 };
 
@@ -1261,35 +1308,7 @@ TEST_P(PinL0IndexAndFilterBlocksTest,
 TEST_P(PinL0IndexAndFilterBlocksTest,
        MultiLevelIndexAndFilterBlocksCachedWithPinning) {
   Options options = CurrentOptions();
-  if (infinite_max_files_) {
-    options.max_open_files = -1;
-  }
-  options.create_if_missing = true;
-  options.statistics = rocksdb::CreateDBStatistics();
-  BlockBasedTableOptions table_options;
-  table_options.cache_index_and_filter_blocks = true;
-  table_options.pin_l0_filter_and_index_blocks_in_cache = true;
-  table_options.filter_policy.reset(NewBloomFilterPolicy(20));
-  options.table_factory.reset(new BlockBasedTableFactory(table_options));
-  CreateAndReopenWithCF({"pikachu"}, options);
-
-  Put(1, "a", "begin");
-  Put(1, "z", "end");
-  ASSERT_OK(Flush(1));
-  // move this table to L1
-  dbfull()->TEST_CompactRange(0, nullptr, nullptr, handles_[1]);
-
-  // reset block cache
-  table_options.block_cache = NewLRUCache(64 * 1024);
-  options.table_factory.reset(NewBlockBasedTableFactory(table_options));
-  TryReopenWithColumnFamilies({"default", "pikachu"}, options);
-  // create new table at L0
-  Put(1, "a2", "begin2");
-  Put(1, "z2", "end2");
-  ASSERT_OK(Flush(1));
-
-  table_options.block_cache->EraseUnRefEntries();
-
+  PinL0IndexAndFilterBlocksTest::CreateTwoLevels(&options, false);
   // get base cache values
   uint64_t fm = TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS);
   uint64_t fh = TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT);
@@ -1309,14 +1328,128 @@ TEST_P(PinL0IndexAndFilterBlocksTest,
   // the file is opened, prefetching results in a cache filter miss
   // the block is loaded and added to the cache,
   // then the get results in a cache hit for L1
+  // When we have inifinite max_files, there is still cache miss because we have
+  // reset the block cache
   value = Get(1, "a");
   ASSERT_EQ(fm + 1, TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS));
   ASSERT_EQ(im + 1, TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS));
 }
 
+TEST_P(PinL0IndexAndFilterBlocksTest, DisablePrefetchingNonL0IndexAndFilter) {
+  Options options = CurrentOptions();
+  // This ensures that db does not ref anything in the block cache, so
+  // EraseUnRefEntries could clear them up.
+  bool close_afterwards = true;
+  PinL0IndexAndFilterBlocksTest::CreateTwoLevels(&options, close_afterwards);
+
+  // Get base cache values
+  uint64_t fm = TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS);
+  uint64_t fh = TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT);
+  uint64_t im = TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS);
+  uint64_t ih = TestGetTickerCount(options, BLOCK_CACHE_INDEX_HIT);
+
+  // Reopen database. If max_open_files is set as -1, table readers will be
+  // preloaded. This will trigger a BlockBasedTable::Open() and prefetch
+  // L0 index and filter. Level 1's prefetching is disabled in DB::Open()
+  TryReopenWithColumnFamilies({"default", "pikachu"}, options);
+
+  if (infinite_max_files_) {
+    // After reopen, cache miss are increased by one because we read (and only
+    // read) filter and index on L0
+    ASSERT_EQ(fm + 1, TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS));
+    ASSERT_EQ(fh, TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT));
+    ASSERT_EQ(im + 1, TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS));
+    ASSERT_EQ(ih, TestGetTickerCount(options, BLOCK_CACHE_INDEX_HIT));
+  } else {
+    // If max_open_files is not -1, we do not preload table readers, so there is
+    // no change.
+    ASSERT_EQ(fm, TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS));
+    ASSERT_EQ(fh, TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT));
+    ASSERT_EQ(im, TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS));
+    ASSERT_EQ(ih, TestGetTickerCount(options, BLOCK_CACHE_INDEX_HIT));
+  }
+  std::string value;
+  // this should be read from L0
+  value = Get(1, "a2");
+  // If max_open_files is -1, we have pinned index and filter in Rep, so there
+  // will not be changes in index and filter misses or hits. If max_open_files
+  // is not -1, Get() will open a TableReader and prefetch index and filter.
+  ASSERT_EQ(fm + 1, TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS));
+  ASSERT_EQ(fh, TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT));
+  ASSERT_EQ(im + 1, TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS));
+  ASSERT_EQ(ih, TestGetTickerCount(options, BLOCK_CACHE_INDEX_HIT));
+
+  // this should be read from L1
+  value = Get(1, "a");
+  if (infinite_max_files_) {
+    // In inifinite max files case, there's a cache miss in executing Get()
+    // because index and filter are not prefetched before.
+    ASSERT_EQ(fm + 2, TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS));
+    ASSERT_EQ(fh, TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT));
+    ASSERT_EQ(im + 2, TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS));
+    ASSERT_EQ(ih, TestGetTickerCount(options, BLOCK_CACHE_INDEX_HIT));
+  } else {
+    // In this case, cache miss will be increased by one in
+    // BlockBasedTable::Open() because this is not in DB::Open() code path so we
+    // will prefetch L1's index and filter. Cache hit will also be increased by
+    // one because Get() will read index and filter from the block cache
+    // prefetched in previous Open() call.
+    ASSERT_EQ(fm + 2, TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS));
+    ASSERT_EQ(fh + 1, TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT));
+    ASSERT_EQ(im + 2, TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS));
+    ASSERT_EQ(ih + 1, TestGetTickerCount(options, BLOCK_CACHE_INDEX_HIT));
+  }
+}
+
 INSTANTIATE_TEST_CASE_P(PinL0IndexAndFilterBlocksTest,
                         PinL0IndexAndFilterBlocksTest, ::testing::Bool());
+
 #ifndef ROCKSDB_LITE
+TEST_F(DBTest2, MaxCompactionBytesTest) {
+  Options options = CurrentOptions();
+  options.memtable_factory.reset(
+      new SpecialSkipListFactory(DBTestBase::kNumKeysByGenerateNewRandomFile));
+  options.compaction_style = kCompactionStyleLevel;
+  options.write_buffer_size = 200 << 10;
+  options.arena_block_size = 4 << 10;
+  options.level0_file_num_compaction_trigger = 4;
+  options.num_levels = 4;
+  options.compression = kNoCompression;
+  options.max_bytes_for_level_base = 450 << 10;
+  options.target_file_size_base = 100 << 10;
+  // Infinite for full compaction.
+  options.max_compaction_bytes = options.target_file_size_base * 100;
+
+  Reopen(options);
+
+  Random rnd(301);
+
+  for (int num = 0; num < 8; num++) {
+    GenerateNewRandomFile(&rnd);
+  }
+  CompactRangeOptions cro;
+  cro.bottommost_level_compaction = BottommostLevelCompaction::kForce;
+  ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
+  ASSERT_EQ("0,0,8", FilesPerLevel(0));
+
+  // When compact from Ln -> Ln+1, cut a file if the file overlaps with
+  // more than three files in Ln+1.
+  options.max_compaction_bytes = options.target_file_size_base * 3;
+  Reopen(options);
+
+  GenerateNewRandomFile(&rnd);
+  // Add three more small files that overlap with the previous file
+  for (int i = 0; i < 3; i++) {
+    Put("a", "z");
+    ASSERT_OK(Flush());
+  }
+  dbfull()->TEST_WaitForCompact();
+
+  // Output files to L1 are cut to three pieces, according to
+  // options.max_compaction_bytes
+  ASSERT_EQ("0,3,8", FilesPerLevel(0));
+}
+
 static void UniqueIdCallback(void* arg) {
   int* result = reinterpret_cast<int*>(arg);
   if (*result == -1) {
@@ -1338,6 +1471,10 @@ class MockPersistentCache : public PersistentCache {
   }
 
   virtual ~MockPersistentCache() {}
+
+  PersistentCache::StatsType Stats() override {
+    return PersistentCache::StatsType();
+  }
 
   Status Insert(const Slice& page_key, const char* data,
                 const size_t size) override {
@@ -1370,6 +1507,10 @@ class MockPersistentCache : public PersistentCache {
 
   bool IsCompressed() override { return is_compressed_; }
 
+  std::string GetPrintableOptions() const override {
+    return "MockPersistentCache";
+  }
+
   port::Mutex lock_;
   std::map<std::string, std::string> data_;
   const bool is_compressed_ = true;
@@ -1377,6 +1518,7 @@ class MockPersistentCache : public PersistentCache {
   const size_t max_size_ = 10 * 1024;  // 10KiB
 };
 
+#ifndef OS_SOLARIS // GetUniqueIdFromFile is not implemented
 TEST_F(DBTest2, PersistentCache) {
   int num_iter = 80;
 
@@ -1440,6 +1582,7 @@ TEST_F(DBTest2, PersistentCache) {
     }
   }
 }
+#endif // !OS_SOLARIS
 
 namespace {
 void CountSyncPoint() {
@@ -1477,8 +1620,8 @@ TEST_F(DBTest2, SyncPointMarker) {
     CountSyncPoint();
   };
 
-  auto thread1 = std::thread(func1);
-  auto thread2 = std::thread(func2);
+  auto thread1 = port::Thread(func1);
+  auto thread2 = port::Thread(func2);
   thread1.join();
   thread2.join();
 
@@ -1487,6 +1630,457 @@ TEST_F(DBTest2, SyncPointMarker) {
   rocksdb::SyncPoint::GetInstance()->DisableProcessing();
 }
 #endif
+
+size_t GetEncodedEntrySize(size_t key_size, size_t value_size) {
+  std::string buffer;
+
+  PutVarint32(&buffer, static_cast<uint32_t>(0));
+  PutVarint32(&buffer, static_cast<uint32_t>(key_size));
+  PutVarint32(&buffer, static_cast<uint32_t>(value_size));
+
+  return buffer.size() + key_size + value_size;
+}
+
+TEST_F(DBTest2, ReadAmpBitmap) {
+  Options options = CurrentOptions();
+  BlockBasedTableOptions bbto;
+  // Disable delta encoding to make it easier to calculate read amplification
+  bbto.use_delta_encoding = false;
+  // Huge block cache to make it easier to calculate read amplification
+  bbto.block_cache = NewLRUCache(1024 * 1024 * 1024);
+  bbto.read_amp_bytes_per_bit = 16;
+  options.table_factory.reset(NewBlockBasedTableFactory(bbto));
+  options.statistics = rocksdb::CreateDBStatistics();
+  DestroyAndReopen(options);
+
+  const size_t kNumEntries = 10000;
+
+  Random rnd(301);
+  for (size_t i = 0; i < kNumEntries; i++) {
+    ASSERT_OK(Put(Key(static_cast<int>(i)), RandomString(&rnd, 100)));
+  }
+  ASSERT_OK(Flush());
+
+  Close();
+  Reopen(options);
+
+  // Read keys/values randomly and verify that reported read amp error
+  // is less than 2%
+  uint64_t total_useful_bytes = 0;
+  std::set<int> read_keys;
+  std::string value;
+  for (size_t i = 0; i < kNumEntries * 5; i++) {
+    int key_idx = rnd.Next() % kNumEntries;
+    std::string k = Key(key_idx);
+    ASSERT_OK(db_->Get(ReadOptions(), k, &value));
+
+    if (read_keys.find(key_idx) == read_keys.end()) {
+      auto ik = InternalKey(k, 0, ValueType::kTypeValue);
+      total_useful_bytes += GetEncodedEntrySize(ik.size(), value.size());
+      read_keys.insert(key_idx);
+    }
+
+    double expected_read_amp =
+        static_cast<double>(total_useful_bytes) /
+        options.statistics->getTickerCount(READ_AMP_TOTAL_READ_BYTES);
+
+    double read_amp =
+        static_cast<double>(options.statistics->getTickerCount(
+            READ_AMP_ESTIMATE_USEFUL_BYTES)) /
+        options.statistics->getTickerCount(READ_AMP_TOTAL_READ_BYTES);
+
+    double error_pct = fabs(expected_read_amp - read_amp) * 100;
+    // Error between reported read amp and real read amp should be less than 2%
+    EXPECT_LE(error_pct, 2);
+  }
+
+  // Make sure we read every thing in the DB (which is smaller than our cache)
+  Iterator* iter = db_->NewIterator(ReadOptions());
+  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+    ASSERT_EQ(iter->value().ToString(), Get(iter->key().ToString()));
+  }
+  delete iter;
+
+  // Read amp is 100% since we read all what we loaded in memory
+  ASSERT_EQ(options.statistics->getTickerCount(READ_AMP_ESTIMATE_USEFUL_BYTES),
+            options.statistics->getTickerCount(READ_AMP_TOTAL_READ_BYTES));
+}
+
+#ifndef OS_SOLARIS // GetUniqueIdFromFile is not implemented
+TEST_F(DBTest2, ReadAmpBitmapLiveInCacheAfterDBClose) {
+  if (dbname_.find("dev/shm") != std::string::npos) {
+    // /dev/shm dont support getting a unique file id, this mean that
+    // running this test on /dev/shm will fail because lru_cache will load
+    // the blocks again regardless of them being already in the cache
+    return;
+  }
+
+  std::shared_ptr<Cache> lru_cache = NewLRUCache(1024 * 1024 * 1024);
+  std::shared_ptr<Statistics> stats = rocksdb::CreateDBStatistics();
+
+  Options options = CurrentOptions();
+  BlockBasedTableOptions bbto;
+  // Disable delta encoding to make it easier to calculate read amplification
+  bbto.use_delta_encoding = false;
+  // Huge block cache to make it easier to calculate read amplification
+  bbto.block_cache = lru_cache;
+  bbto.read_amp_bytes_per_bit = 16;
+  options.table_factory.reset(NewBlockBasedTableFactory(bbto));
+  options.statistics = stats;
+  DestroyAndReopen(options);
+
+  const int kNumEntries = 10000;
+
+  Random rnd(301);
+  for (int i = 0; i < kNumEntries; i++) {
+    ASSERT_OK(Put(Key(i), RandomString(&rnd, 100)));
+  }
+  ASSERT_OK(Flush());
+
+  Close();
+  Reopen(options);
+
+  uint64_t total_useful_bytes = 0;
+  std::set<int> read_keys;
+  std::string value;
+  // Iter1: Read half the DB, Read even keys
+  // Key(0), Key(2), Key(4), Key(6), Key(8), ...
+  for (int i = 0; i < kNumEntries; i += 2) {
+    std::string k = Key(i);
+    ASSERT_OK(db_->Get(ReadOptions(), k, &value));
+
+    if (read_keys.find(i) == read_keys.end()) {
+      auto ik = InternalKey(k, 0, ValueType::kTypeValue);
+      total_useful_bytes += GetEncodedEntrySize(ik.size(), value.size());
+      read_keys.insert(i);
+    }
+  }
+
+  size_t total_useful_bytes_iter1 =
+      options.statistics->getTickerCount(READ_AMP_ESTIMATE_USEFUL_BYTES);
+  size_t total_loaded_bytes_iter1 =
+      options.statistics->getTickerCount(READ_AMP_TOTAL_READ_BYTES);
+
+  Close();
+  std::shared_ptr<Statistics> new_statistics = rocksdb::CreateDBStatistics();
+  // Destroy old statistics obj that the blocks in lru_cache are pointing to
+  options.statistics.reset();
+  // Use the statistics object that we just created
+  options.statistics = new_statistics;
+  Reopen(options);
+
+  // Iter2: Read half the DB, Read odd keys
+  // Key(1), Key(3), Key(5), Key(7), Key(9), ...
+  for (int i = 1; i < kNumEntries; i += 2) {
+    std::string k = Key(i);
+    ASSERT_OK(db_->Get(ReadOptions(), k, &value));
+
+    if (read_keys.find(i) == read_keys.end()) {
+      auto ik = InternalKey(k, 0, ValueType::kTypeValue);
+      total_useful_bytes += GetEncodedEntrySize(ik.size(), value.size());
+      read_keys.insert(i);
+    }
+  }
+
+  size_t total_useful_bytes_iter2 =
+      options.statistics->getTickerCount(READ_AMP_ESTIMATE_USEFUL_BYTES);
+  size_t total_loaded_bytes_iter2 =
+      options.statistics->getTickerCount(READ_AMP_TOTAL_READ_BYTES);
+
+  // We reached read_amp of 100% because we read all the keys in the DB
+  ASSERT_EQ(total_useful_bytes_iter1 + total_useful_bytes_iter2,
+            total_loaded_bytes_iter1 + total_loaded_bytes_iter2);
+}
+#endif // !OS_SOLARIS
+
+#ifndef ROCKSDB_LITE
+TEST_F(DBTest2, AutomaticCompactionOverlapManualCompaction) {
+  Options options = CurrentOptions();
+  options.num_levels = 3;
+  options.IncreaseParallelism(20);
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put(Key(0), "a"));
+  ASSERT_OK(Put(Key(5), "a"));
+  ASSERT_OK(Flush());
+
+  ASSERT_OK(Put(Key(10), "a"));
+  ASSERT_OK(Put(Key(15), "a"));
+  ASSERT_OK(Flush());
+
+  CompactRangeOptions cro;
+  cro.change_level = true;
+  cro.target_level = 2;
+  ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
+
+  auto get_stat = [](std::string level_str, LevelStatType type,
+                     std::map<std::string, double> props) {
+    auto prop_str =
+        level_str + "." +
+        InternalStats::compaction_level_stats.at(type).property_name.c_str();
+    auto prop_item = props.find(prop_str);
+    return prop_item == props.end() ? 0 : prop_item->second;
+  };
+
+  // Trivial move 2 files to L2
+  ASSERT_EQ("0,0,2", FilesPerLevel());
+  // Also test that the stats GetMapProperty API reporting the same result
+  {
+    std::map<std::string, double> prop;
+    ASSERT_TRUE(dbfull()->GetMapProperty("rocksdb.cfstats", &prop));
+    ASSERT_EQ(0, get_stat("L0", LevelStatType::NUM_FILES, prop));
+    ASSERT_EQ(0, get_stat("L1", LevelStatType::NUM_FILES, prop));
+    ASSERT_EQ(2, get_stat("L2", LevelStatType::NUM_FILES, prop));
+    ASSERT_EQ(2, get_stat("Sum", LevelStatType::NUM_FILES, prop));
+  }
+
+  // While the compaction is running, we will create 2 new files that
+  // can fit in L2, these 2 files will be moved to L2 and overlap with
+  // the running compaction and break the LSM consistency.
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "CompactionJob::Run():Start", [&](void* arg) {
+        ASSERT_OK(
+            dbfull()->SetOptions({{"level0_file_num_compaction_trigger", "2"},
+                                  {"max_bytes_for_level_base", "1"}}));
+        ASSERT_OK(Put(Key(6), "a"));
+        ASSERT_OK(Put(Key(7), "a"));
+        ASSERT_OK(Flush());
+
+        ASSERT_OK(Put(Key(8), "a"));
+        ASSERT_OK(Put(Key(9), "a"));
+        ASSERT_OK(Flush());
+      });
+  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+
+  // Run a manual compaction that will compact the 2 files in L2
+  // into 1 file in L2
+  cro.exclusive_manual_compaction = false;
+  cro.bottommost_level_compaction = BottommostLevelCompaction::kForce;
+  ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
+
+  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+
+  // Test that the stats GetMapProperty API reporting 1 file in L2
+  {
+    std::map<std::string, double> prop;
+    ASSERT_TRUE(dbfull()->GetMapProperty("rocksdb.cfstats", &prop));
+    ASSERT_EQ(1, get_stat("L2", LevelStatType::NUM_FILES, prop));
+  }
+}
+
+TEST_F(DBTest2, ManualCompactionOverlapManualCompaction) {
+  Options options = CurrentOptions();
+  options.num_levels = 2;
+  options.IncreaseParallelism(20);
+  options.disable_auto_compactions = true;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put(Key(0), "a"));
+  ASSERT_OK(Put(Key(5), "a"));
+  ASSERT_OK(Flush());
+
+  ASSERT_OK(Put(Key(10), "a"));
+  ASSERT_OK(Put(Key(15), "a"));
+  ASSERT_OK(Flush());
+
+  ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
+
+  // Trivial move 2 files to L1
+  ASSERT_EQ("0,2", FilesPerLevel());
+
+  std::function<void()> bg_manual_compact = [&]() {
+    std::string k1 = Key(6);
+    std::string k2 = Key(9);
+    Slice k1s(k1);
+    Slice k2s(k2);
+    CompactRangeOptions cro;
+    cro.exclusive_manual_compaction = false;
+    ASSERT_OK(db_->CompactRange(cro, &k1s, &k2s));
+  };
+  rocksdb::port::Thread bg_thread;
+
+  // While the compaction is running, we will create 2 new files that
+  // can fit in L1, these 2 files will be moved to L1 and overlap with
+  // the running compaction and break the LSM consistency.
+  std::atomic<bool> flag(false);
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "CompactionJob::Run():Start", [&](void* arg) {
+        if (flag.exchange(true)) {
+          // We want to make sure to call this callback only once
+          return;
+        }
+        ASSERT_OK(Put(Key(6), "a"));
+        ASSERT_OK(Put(Key(7), "a"));
+        ASSERT_OK(Flush());
+
+        ASSERT_OK(Put(Key(8), "a"));
+        ASSERT_OK(Put(Key(9), "a"));
+        ASSERT_OK(Flush());
+
+        // Start a non-exclusive manual compaction in a bg thread
+        bg_thread = port::Thread(bg_manual_compact);
+        // This manual compaction conflict with the other manual compaction
+        // so it should wait until the first compaction finish
+        env_->SleepForMicroseconds(1000000);
+      });
+  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+
+  // Run a manual compaction that will compact the 2 files in L1
+  // into 1 file in L1
+  CompactRangeOptions cro;
+  cro.exclusive_manual_compaction = false;
+  cro.bottommost_level_compaction = BottommostLevelCompaction::kForce;
+  ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
+  bg_thread.join();
+
+  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+}
+
+TEST_F(DBTest2, OptimizeForPointLookup) {
+  Options options = CurrentOptions();
+  Close();
+  options.OptimizeForPointLookup(2);
+  ASSERT_OK(DB::Open(options, dbname_, &db_));
+
+  ASSERT_OK(Put("foo", "v1"));
+  ASSERT_EQ("v1", Get("foo"));
+  Flush();
+  ASSERT_EQ("v1", Get("foo"));
+}
+
+#endif  // ROCKSDB_LITE
+
+TEST_F(DBTest2, GetRaceFlush1) {
+  ASSERT_OK(Put("foo", "v1"));
+
+  rocksdb::SyncPoint::GetInstance()->LoadDependency(
+      {{"DBImpl::GetImpl:1", "DBTest2::GetRaceFlush:1"},
+       {"DBTest2::GetRaceFlush:2", "DBImpl::GetImpl:2"}});
+
+  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+
+  rocksdb::port::Thread t1([&] {
+    TEST_SYNC_POINT("DBTest2::GetRaceFlush:1");
+    ASSERT_OK(Put("foo", "v2"));
+    Flush();
+    TEST_SYNC_POINT("DBTest2::GetRaceFlush:2");
+  });
+
+  // Get() is issued after the first Put(), so it should see either
+  // "v1" or "v2".
+  ASSERT_NE("NOT_FOUND", Get("foo"));
+  t1.join();
+  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+}
+
+TEST_F(DBTest2, GetRaceFlush2) {
+  ASSERT_OK(Put("foo", "v1"));
+
+  rocksdb::SyncPoint::GetInstance()->LoadDependency(
+      {{"DBImpl::GetImpl:3", "DBTest2::GetRaceFlush:1"},
+       {"DBTest2::GetRaceFlush:2", "DBImpl::GetImpl:4"}});
+
+  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+
+  port::Thread t1([&] {
+    TEST_SYNC_POINT("DBTest2::GetRaceFlush:1");
+    ASSERT_OK(Put("foo", "v2"));
+    Flush();
+    TEST_SYNC_POINT("DBTest2::GetRaceFlush:2");
+  });
+
+  // Get() is issued after the first Put(), so it should see either
+  // "v1" or "v2".
+  ASSERT_NE("NOT_FOUND", Get("foo"));
+  t1.join();
+  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+}
+
+TEST_F(DBTest2, DirectIO) {
+  if (!IsDirectIOSupported()) {
+    return;
+  }
+  Options options = CurrentOptions();
+  options.use_direct_reads = options.use_direct_io_for_flush_and_compaction =
+      true;
+  options.allow_mmap_reads = options.allow_mmap_writes = false;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put(Key(0), "a"));
+  ASSERT_OK(Put(Key(5), "a"));
+  ASSERT_OK(Flush());
+
+  ASSERT_OK(Put(Key(10), "a"));
+  ASSERT_OK(Put(Key(15), "a"));
+  ASSERT_OK(Flush());
+
+  ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
+  Reopen(options);
+}
+
+TEST_F(DBTest2, MemtableOnlyIterator) {
+  Options options = CurrentOptions();
+  CreateAndReopenWithCF({"pikachu"}, options);
+
+  ASSERT_OK(Put(1, "foo", "first"));
+  ASSERT_OK(Put(1, "bar", "second"));
+
+  ReadOptions ropt;
+  ropt.read_tier = kMemtableTier;
+  std::string value;
+  Iterator* it = nullptr;
+
+  // Before flushing
+  // point lookups
+  ASSERT_OK(db_->Get(ropt, handles_[1], "foo", &value));
+  ASSERT_EQ("first", value);
+  ASSERT_OK(db_->Get(ropt, handles_[1], "bar", &value));
+  ASSERT_EQ("second", value);
+
+  // Memtable-only iterator (read_tier=kMemtableTier); data not flushed yet.
+  it = db_->NewIterator(ropt, handles_[1]);
+  int count = 0;
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    ASSERT_TRUE(it->Valid());
+    count++;
+  }
+  ASSERT_TRUE(!it->Valid());
+  ASSERT_EQ(2, count);
+  delete it;
+
+  Flush(1);
+
+  // After flushing
+  // point lookups
+  ASSERT_OK(db_->Get(ropt, handles_[1], "foo", &value));
+  ASSERT_EQ("first", value);
+  ASSERT_OK(db_->Get(ropt, handles_[1], "bar", &value));
+  ASSERT_EQ("second", value);
+  // nothing should be returned using memtable-only iterator after flushing.
+  it = db_->NewIterator(ropt, handles_[1]);
+  count = 0;
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    ASSERT_TRUE(it->Valid());
+    count++;
+  }
+  ASSERT_TRUE(!it->Valid());
+  ASSERT_EQ(0, count);
+  delete it;
+
+  // Add a key to memtable
+  ASSERT_OK(Put(1, "foobar", "third"));
+  it = db_->NewIterator(ropt, handles_[1]);
+  count = 0;
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ("foobar", it->key().ToString());
+    ASSERT_EQ("third", it->value().ToString());
+    count++;
+  }
+  ASSERT_TRUE(!it->Valid());
+  ASSERT_EQ(1, count);
+  delete it;
+}
 }  // namespace rocksdb
 
 int main(int argc, char** argv) {

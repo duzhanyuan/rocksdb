@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 
 #ifndef ROCKSDB_LITE
@@ -16,7 +18,7 @@
 #include "port/port.h"
 #include "util/murmurhash.h"
 #include "db/memtable.h"
-#include "db/skiplist.h"
+#include "memtable/skiplist.h"
 
 namespace rocksdb {
 namespace {
@@ -130,6 +132,13 @@ class HashSkipListRep : public MemTableRep {
       }
     }
 
+    // Retreat to the last entry with a key <= target
+    virtual void SeekForPrev(const Slice& internal_key,
+                             const char* memtable_key) override {
+      // not supported
+      assert(false);
+    }
+
     // Position at the first entry in collection.
     // Final state of iterator is Valid() iff collection is not empty.
     virtual void SeekToFirst() override {
@@ -214,6 +223,8 @@ class HashSkipListRep : public MemTableRep {
     virtual void Prev() override {}
     virtual void Seek(const Slice& internal_key,
                       const char* memtable_key) override {}
+    virtual void SeekForPrev(const Slice& internal_key,
+                             const char* memtable_key) override {}
     virtual void SeekToFirst() override {}
     virtual void SeekToLast() override {}
 

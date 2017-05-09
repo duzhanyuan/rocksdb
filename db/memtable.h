@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -13,19 +15,20 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "db/dbformat.h"
-#include "db/skiplist.h"
+#include "db/range_del_aggregator.h"
 #include "db/version_edit.h"
+#include "memtable/memtable_allocator.h"
+#include "monitoring/instrumented_mutex.h"
+#include "options/cf_options.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
 #include "rocksdb/memtablerep.h"
-#include "rocksdb/immutable_options.h"
-#include "db/memtable_allocator.h"
 #include "util/concurrent_arena.h"
 #include "util/dynamic_bloom.h"
-#include "util/instrumented_mutex.h"
-#include "util/mutable_cf_options.h"
+#include "util/hash.h"
 
 namespace rocksdb {
 
@@ -41,7 +44,7 @@ struct MemTableOptions {
   size_t write_buffer_size;
   size_t arena_block_size;
   uint32_t memtable_prefix_bloom_bits;
-  size_t memtable_prefix_bloom_huge_page_tlb_size;
+  size_t memtable_huge_page_size;
   bool inplace_update_support;
   size_t inplace_update_num_locks;
   UpdateStatus (*inplace_callback)(char* existing_value,
@@ -159,6 +162,8 @@ class MemTable {
   //        those allocated in arena.
   InternalIterator* NewIterator(const ReadOptions& read_options, Arena* arena);
 
+  InternalIterator* NewRangeTombstoneIterator(const ReadOptions& read_options);
+
   // Add an entry into memtable that maps key to value at the
   // specified sequence number and with the specified type.
   // Typically value will be empty if type==kTypeDeletion.
@@ -183,12 +188,14 @@ class MemTable {
   // On success, *s may be set to OK, NotFound, or MergeInProgress.  Any other
   // status returned indicates a corruption or other unexpected error.
   bool Get(const LookupKey& key, std::string* value, Status* s,
-           MergeContext* merge_context, SequenceNumber* seq);
+           MergeContext* merge_context, RangeDelAggregator* range_del_agg,
+           SequenceNumber* seq, const ReadOptions& read_opts);
 
   bool Get(const LookupKey& key, std::string* value, Status* s,
-           MergeContext* merge_context) {
+           MergeContext* merge_context, RangeDelAggregator* range_del_agg,
+           const ReadOptions& read_opts) {
     SequenceNumber seq;
-    return Get(key, value, s, merge_context, &seq);
+    return Get(key, value, s, merge_context, range_del_agg, &seq, read_opts);
   }
 
   // Attempts to update the new_value inplace, else does normal Add
@@ -232,8 +239,10 @@ class MemTable {
     num_entries_.fetch_add(update_counters.num_entries,
                            std::memory_order_relaxed);
     data_size_.fetch_add(update_counters.data_size, std::memory_order_relaxed);
-    num_deletes_.fetch_add(update_counters.num_deletes,
-                           std::memory_order_relaxed);
+    if (update_counters.num_deletes != 0) {
+      num_deletes_.fetch_add(update_counters.num_deletes,
+                             std::memory_order_relaxed);
+    }
     UpdateFlushState();
   }
 
@@ -278,6 +287,12 @@ class MemTable {
     return earliest_seqno_.load(std::memory_order_relaxed);
   }
 
+  // DB's latest sequence ID when the memtable is created. This number
+  // may be updated to a more recent one before any key is inserted.
+  SequenceNumber GetCreationSeq() const { return creation_seq_; }
+
+  void SetCreationSeq(SequenceNumber sn) { creation_seq_ = sn; }
+
   // Returns the next active logfile number when this memtable is about to
   // be flushed to storage
   // REQUIRES: external synchronization to prevent simultaneous
@@ -318,7 +333,13 @@ class MemTable {
     return table_->IsSnapshotSupported() && !moptions_.inplace_update_support;
   }
 
-  uint64_t ApproximateSize(const Slice& start_ikey, const Slice& end_ikey);
+  struct MemTableStats {
+    uint64_t size;
+    uint64_t count;
+  };
+
+  MemTableStats ApproximateStats(const Slice& start_ikey,
+                                 const Slice& end_ikey);
 
   // Get the lock associated for the key
   port::RWMutex* GetLock(const Slice& key);
@@ -343,6 +364,8 @@ class MemTable {
   ConcurrentArena arena_;
   MemTableAllocator allocator_;
   unique_ptr<MemTableRep> table_;
+  unique_ptr<MemTableRep> range_del_table_;
+  bool is_range_del_table_empty_;
 
   // Total data size of all data inserted
   std::atomic<uint64_t> data_size_;
@@ -365,6 +388,8 @@ class MemTable {
   // if not set.
   std::atomic<SequenceNumber> earliest_seqno_;
 
+  SequenceNumber creation_seq_;
+
   // The log files earlier than this number can be deleted.
   uint64_t mem_next_logfile_number_;
 
@@ -381,6 +406,12 @@ class MemTable {
   std::atomic<FlushStateEnum> flush_state_;
 
   Env* env_;
+
+  // Extract sequential insert prefixes.
+  const SliceTransform* insert_with_hint_prefix_extractor_;
+
+  // Insert hints for each prefix.
+  std::unordered_map<Slice, void*, SliceHasher> insert_hints_;
 
   // Returns a heuristic flush decision
   bool ShouldFlushNow() const;

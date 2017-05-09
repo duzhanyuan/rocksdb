@@ -2,8 +2,11 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #include "util/sync_point.h"
+#include <functional>
 #include <thread>
 #include "port/port.h"
 #include "util/random.h"
@@ -120,6 +123,10 @@ bool SyncPoint::DisabledByMarker(const std::string& point,
 
 void SyncPoint::Process(const std::string& point, void* cb_arg) {
   std::unique_lock<std::mutex> lock(mutex_);
+  if (!enabled_) {
+    return;
+  }
+
   auto thread_id = std::this_thread::get_id();
 
   auto marker_iter = markers_.find(point);
@@ -130,10 +137,6 @@ void SyncPoint::Process(const std::string& point, void* cb_arg) {
   }
 
   if (DisabledByMarker(point, thread_id)) {
-    return;
-  }
-
-  if (!enabled_) {
     return;
   }
 

@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 
 #pragma once
@@ -106,7 +108,7 @@ class HdfsEnv : public Env {
   }
 
   virtual int UnSchedule(void* tag, Priority pri) {
-    posixEnv->UnSchedule(tag, pri);
+    return posixEnv->UnSchedule(tag, pri);
   }
 
   virtual void StartThread(void (*function)(void* arg), void* arg) {

@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #include <string>
 #include "db/version_edit.h"
@@ -29,9 +31,9 @@ class VersionBuilderTest : public testing::Test {
       : ucmp_(BytewiseComparator()),
         icmp_(ucmp_),
         ioptions_(options_),
-        mutable_cf_options_(options_, ioptions_),
+        mutable_cf_options_(options_),
         vstorage_(&icmp_, ucmp_, options_.num_levels, kCompactionStyleLevel,
-                 nullptr),
+                  nullptr, false),
         file_num_(1) {
     mutable_cf_options_.RefreshDerivedOptions(ioptions_);
     size_being_compacted_.resize(options_.num_levels);
@@ -77,7 +79,7 @@ class VersionBuilderTest : public testing::Test {
   }
 
   void UpdateVersionStorageInfo() {
-    vstorage_.UpdateFilesByCompactionPri(mutable_cf_options_);
+    vstorage_.UpdateFilesByCompactionPri(ioptions_.compaction_pri);
     vstorage_.UpdateNumNonEmptyLevels();
     vstorage_.GenerateFileIndexer();
     vstorage_.GenerateLevelFilesBrief();
@@ -123,7 +125,7 @@ TEST_F(VersionBuilderTest, ApplyAndSaveTo) {
   VersionBuilder version_builder(env_options, nullptr, &vstorage_);
 
   VersionStorageInfo new_vstorage(&icmp_, ucmp_, options_.num_levels,
-                                  kCompactionStyleLevel, nullptr);
+                                  kCompactionStyleLevel, nullptr, false);
   version_builder.Apply(&version_edit);
   version_builder.SaveTo(&new_vstorage);
 
@@ -158,7 +160,7 @@ TEST_F(VersionBuilderTest, ApplyAndSaveToDynamic) {
   VersionBuilder version_builder(env_options, nullptr, &vstorage_);
 
   VersionStorageInfo new_vstorage(&icmp_, ucmp_, options_.num_levels,
-                                  kCompactionStyleLevel, nullptr);
+                                  kCompactionStyleLevel, nullptr, false);
   version_builder.Apply(&version_edit);
   version_builder.SaveTo(&new_vstorage);
 
@@ -198,7 +200,7 @@ TEST_F(VersionBuilderTest, ApplyAndSaveToDynamic2) {
   VersionBuilder version_builder(env_options, nullptr, &vstorage_);
 
   VersionStorageInfo new_vstorage(&icmp_, ucmp_, options_.num_levels,
-                                  kCompactionStyleLevel, nullptr);
+                                  kCompactionStyleLevel, nullptr, false);
   version_builder.Apply(&version_edit);
   version_builder.SaveTo(&new_vstorage);
 
@@ -229,7 +231,7 @@ TEST_F(VersionBuilderTest, ApplyMultipleAndSaveTo) {
   VersionBuilder version_builder(env_options, nullptr, &vstorage_);
 
   VersionStorageInfo new_vstorage(&icmp_, ucmp_, options_.num_levels,
-                                  kCompactionStyleLevel, nullptr);
+                                  kCompactionStyleLevel, nullptr, false);
   version_builder.Apply(&version_edit);
   version_builder.SaveTo(&new_vstorage);
 
@@ -244,7 +246,7 @@ TEST_F(VersionBuilderTest, ApplyDeleteAndSaveTo) {
   EnvOptions env_options;
   VersionBuilder version_builder(env_options, nullptr, &vstorage_);
   VersionStorageInfo new_vstorage(&icmp_, ucmp_, options_.num_levels,
-                                  kCompactionStyleLevel, nullptr);
+                                  kCompactionStyleLevel, nullptr, false);
 
   VersionEdit version_edit;
   version_edit.AddFile(2, 666, 0, 100U, GetInternalKey("301"),

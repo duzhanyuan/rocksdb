@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #include <algorithm>
 #include <string>
@@ -28,8 +30,9 @@ class MergeHelperTest : public testing::Test {
     iter_->SeekToFirst();
     merge_helper_.reset(new MergeHelper(env_, BytewiseComparator(),
                                         merge_op_.get(), filter_.get(), nullptr,
-                                        2U, false, latest_snapshot));
-    return merge_helper_->MergeUntil(iter_.get(), stop_before, at_bottom);
+                                        false, latest_snapshot));
+    return merge_helper_->MergeUntil(iter_.get(), nullptr /* range_del_agg */,
+                                     stop_before, at_bottom);
   }
 
   void AddKeyVal(const std::string& user_key, const SequenceNumber& seq,

@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -15,7 +17,7 @@
 
 namespace rocksdb {
 
-#if ROCKSDB_SUPPORT_THREAD_LOCAL
+#ifdef ROCKSDB_SUPPORT_THREAD_LOCAL
 __thread uint32_t ConcurrentArena::tls_cpuid = 0;
 #endif
 
@@ -39,7 +41,7 @@ ConcurrentArena::Shard* ConcurrentArena::Repick() {
     cpuid =
         Random::GetTLSInstance()->Uniform(static_cast<int>(index_mask_) + 1);
   }
-#if ROCKSDB_SUPPORT_THREAD_LOCAL
+#ifdef ROCKSDB_SUPPORT_THREAD_LOCAL
   // even if we are cpu 0, use a non-zero tls_cpuid so we can tell we
   // have repicked
   tls_cpuid = cpuid | (static_cast<int>(index_mask_) + 1);

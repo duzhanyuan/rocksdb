@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -10,6 +12,7 @@
 #pragma once
 
 #include "rocksdb/env.h"
+#include "rocksdb/statistics.h"
 
 namespace rocksdb {
 
@@ -24,7 +27,21 @@ class RateLimiter {
   // Request for token to write bytes. If this request can not be satisfied,
   // the call is blocked. Caller is responsible to make sure
   // bytes <= GetSingleBurstBytes()
-  virtual void Request(const int64_t bytes, const Env::IOPriority pri) = 0;
+  virtual void Request(const int64_t bytes, const Env::IOPriority pri) {
+    // Deprecated. New RateLimiter derived classes should override
+    // Request(const int64_t, const Env::IOPriority, Statistics*) instead.
+    assert(false);
+  }
+
+  // Request for token to write bytes and potentially update statistics. If this
+  // request can not be satisfied, the call is blocked. Caller is responsible to
+  // make sure bytes <= GetSingleBurstBytes().
+  virtual void Request(const int64_t bytes, const Env::IOPriority pri,
+                       Statistics* /* stats */) {
+    // For API compatibility, default implementation calls the older API in
+    // which statistics are unsupported.
+    Request(bytes, pri);
+  }
 
   // Max bytes can be granted in a single burst
   virtual int64_t GetSingleBurstBytes() const = 0;

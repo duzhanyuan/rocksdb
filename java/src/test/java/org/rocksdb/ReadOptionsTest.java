@@ -62,6 +62,72 @@ public class ReadOptionsTest {
   }
 
   @Test
+  public void readTier() {
+    try (final ReadOptions opt = new ReadOptions()) {
+      opt.setReadTier(ReadTier.BLOCK_CACHE_TIER);
+      assertThat(opt.readTier()).isEqualTo(ReadTier.BLOCK_CACHE_TIER);
+    }
+  }
+
+  @Test
+  public void managed() {
+    try (final ReadOptions opt = new ReadOptions()) {
+      opt.setManaged(true);
+      assertThat(opt.managed()).isTrue();
+    }
+  }
+
+  @Test
+  public void totalOrderSeek() {
+    try (final ReadOptions opt = new ReadOptions()) {
+      opt.setTotalOrderSeek(true);
+      assertThat(opt.totalOrderSeek()).isTrue();
+    }
+  }
+
+  @Test
+  public void prefixSameAsStart() {
+    try (final ReadOptions opt = new ReadOptions()) {
+      opt.setPrefixSameAsStart(true);
+      assertThat(opt.prefixSameAsStart()).isTrue();
+    }
+  }
+
+  @Test
+  public void pinData() {
+    try (final ReadOptions opt = new ReadOptions()) {
+      opt.setPinData(true);
+      assertThat(opt.pinData()).isTrue();
+    }
+  }
+
+  @Test
+  public void backgroundPurgeOnIteratorCleanup() {
+    try (final ReadOptions opt = new ReadOptions()) {
+      opt.setBackgroundPurgeOnIteratorCleanup(true);
+      assertThat(opt.backgroundPurgeOnIteratorCleanup()).isTrue();
+    }
+  }
+
+  @Test
+  public void readaheadSize() {
+    try (final ReadOptions opt = new ReadOptions()) {
+      final Random rand = new Random();
+      final long longValue = rand.nextLong();
+      opt.setReadaheadSize(longValue);
+      assertThat(opt.readaheadSize()).isEqualTo(longValue);
+    }
+  }
+
+  @Test
+  public void ignoreRangeDeletions() {
+    try (final ReadOptions opt = new ReadOptions()) {
+      opt.setIgnoreRangeDeletions(true);
+      assertThat(opt.ignoreRangeDeletions()).isTrue();
+    }
+  }
+
+  @Test
   public void failSetVerifyChecksumUninitialized() {
     try (final ReadOptions readOptions =
              setupUninitializedReadOptions(exception)) {

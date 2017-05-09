@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #ifndef ROCKSDB_LITE
 #include "db/compacted_db_impl.h"
@@ -42,11 +44,11 @@ size_t CompactedDBImpl::FindFile(const Slice& key) {
   return right;
 }
 
-Status CompactedDBImpl::Get(const ReadOptions& options,
-     ColumnFamilyHandle*, const Slice& key, std::string* value) {
+Status CompactedDBImpl::Get(const ReadOptions& options, ColumnFamilyHandle*,
+                            const Slice& key, PinnableSlice* value) {
   GetContext get_context(user_comparator_, nullptr, nullptr, nullptr,
                          GetContext::kNotFound, key, value, nullptr, nullptr,
-                         nullptr);
+                         nullptr, nullptr);
   LookupKey lkey(key, kMaxSequenceNumber);
   files_.files[FindFile(key)].fd.table_reader->Get(
       options, lkey.internal_key(), &get_context);
@@ -75,11 +77,14 @@ std::vector<Status> CompactedDBImpl::MultiGet(const ReadOptions& options,
   int idx = 0;
   for (auto* r : reader_list) {
     if (r != nullptr) {
+      PinnableSlice pinnable_val;
+      std::string& value = (*values)[idx];
       GetContext get_context(user_comparator_, nullptr, nullptr, nullptr,
-                             GetContext::kNotFound, keys[idx], &(*values)[idx],
-                             nullptr, nullptr, nullptr);
+                             GetContext::kNotFound, keys[idx], &pinnable_val,
+                             nullptr, nullptr, nullptr, nullptr);
       LookupKey lkey(keys[idx], kMaxSequenceNumber);
       r->Get(options, lkey.internal_key(), &get_context);
+      value.assign(pinnable_val.data(), pinnable_val.size());
       if (get_context.State() == GetContext::kFound) {
         statuses[idx] = Status::OK();
       }
@@ -151,9 +156,9 @@ Status CompactedDBImpl::Open(const Options& options,
   std::unique_ptr<CompactedDBImpl> db(new CompactedDBImpl(db_options, dbname));
   Status s = db->Init(options);
   if (s.ok()) {
-    Log(INFO_LEVEL, db->db_options_.info_log,
-        "Opened the db as fully compacted mode");
-    LogFlush(db->db_options_.info_log);
+    ROCKS_LOG_INFO(db->immutable_db_options_.info_log,
+                   "Opened the db as fully compacted mode");
+    LogFlush(db->immutable_db_options_.info_log);
     *dbptr = db.release();
   }
   return s;

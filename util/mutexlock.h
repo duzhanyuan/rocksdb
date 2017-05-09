@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -59,6 +61,20 @@ class ReadLock {
   void operator=(const ReadLock&);
 };
 
+//
+// Automatically unlock a locked mutex when the object is destroyed
+//
+class ReadUnlock {
+ public:
+  explicit ReadUnlock(port::RWMutex *mu) : mu_(mu) { mu->AssertHeld(); }
+  ~ReadUnlock() { mu_->ReadUnlock(); }
+
+ private:
+  port::RWMutex *const mu_;
+  // No copying allowed
+  ReadUnlock(const ReadUnlock &) = delete;
+  ReadUnlock &operator=(const ReadUnlock &) = delete;
+};
 
 //
 // Acquire a WriteLock on the specified RWMutex.

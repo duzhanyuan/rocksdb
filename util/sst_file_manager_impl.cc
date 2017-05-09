@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #include "util/sst_file_manager_impl.h"
 
@@ -9,11 +11,13 @@
 
 #include "port/port.h"
 #include "rocksdb/env.h"
+#include "rocksdb/sst_file_manager.h"
 #include "util/mutexlock.h"
 #include "util/sync_point.h"
 
 namespace rocksdb {
 
+#ifndef ROCKSDB_LITE
 SstFileManagerImpl::SstFileManagerImpl(Env* env, std::shared_ptr<Logger> logger,
                                        const std::string& trash_dir,
                                        int64_t rate_bytes_per_sec)
@@ -85,6 +89,10 @@ int64_t SstFileManagerImpl::GetDeleteRateBytesPerSecond() {
   return delete_scheduler_.GetRateBytesPerSecond();
 }
 
+void SstFileManagerImpl::SetDeleteRateBytesPerSecond(int64_t delete_rate) {
+  return delete_scheduler_.SetRateBytesPerSecond(delete_rate);
+}
+
 Status SstFileManagerImpl::ScheduleFileDeletion(const std::string& file_path) {
   return delete_scheduler_.DeleteFile(file_path);
 }
@@ -120,14 +128,14 @@ void SstFileManagerImpl::OnDeleteFileImpl(const std::string& file_path) {
 SstFileManager* NewSstFileManager(Env* env, std::shared_ptr<Logger> info_log,
                                   std::string trash_dir,
                                   int64_t rate_bytes_per_sec,
-                                  bool delete_exisitng_trash, Status* status) {
+                                  bool delete_existing_trash, Status* status) {
   SstFileManagerImpl* res =
       new SstFileManagerImpl(env, info_log, trash_dir, rate_bytes_per_sec);
 
   Status s;
-  if (trash_dir != "" && rate_bytes_per_sec > 0) {
+  if (trash_dir != "") {
     s = env->CreateDirIfMissing(trash_dir);
-    if (s.ok() && delete_exisitng_trash) {
+    if (s.ok() && delete_existing_trash) {
       std::vector<std::string> files_in_trash;
       s = env->GetChildren(trash_dir, &files_in_trash);
       if (s.ok()) {
@@ -154,4 +162,20 @@ SstFileManager* NewSstFileManager(Env* env, std::shared_ptr<Logger> info_log,
   return res;
 }
 
+#else
+
+SstFileManager* NewSstFileManager(Env* env, std::shared_ptr<Logger> info_log,
+                                  std::string trash_dir,
+                                  int64_t rate_bytes_per_sec,
+                                  bool delete_existing_trash, Status* status) {
+  if (status) {
+    *status =
+        Status::NotSupported("SstFileManager is not supported in ROCKSDB_LITE");
+  }
+  return nullptr;
+}
+
+#endif  // ROCKSDB_LITE
+
 }  // namespace rocksdb
+

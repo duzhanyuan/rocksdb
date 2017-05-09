@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 #ifndef ROCKSDB_LITE
 #include "rocksdb/memtablerep.h"
@@ -82,6 +84,10 @@ class VectorRep : public MemTableRep {
 
     // Advance to the first entry with a key >= target
     virtual void Seek(const Slice& user_key, const char* memtable_key) override;
+
+    // Advance to the first entry with a key <= target
+    virtual void SeekForPrev(const Slice& user_key,
+                             const char* memtable_key) override;
 
     // Position at the first entry in collection.
     // Final state of iterator is Valid() iff collection is not empty.
@@ -219,6 +225,12 @@ void VectorRep::Iterator::Seek(const Slice& user_key,
                           [this] (const char* a, const char* b) {
                             return compare_(a, b) < 0;
                           }).first;
+}
+
+// Advance to the first entry with a key <= target
+void VectorRep::Iterator::SeekForPrev(const Slice& user_key,
+                                      const char* memtable_key) {
+  assert(false);
 }
 
 // Position at the first entry in collection.

@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -10,13 +12,19 @@
 #ifndef NDEBUG
 
 #include "db/db_impl.h"
-#include "util/thread_status_updater.h"
+#include "monitoring/thread_status_updater.h"
 
 namespace rocksdb {
 
 uint64_t DBImpl::TEST_GetLevel0TotalSize() {
   InstrumentedMutexLock l(&mutex_);
   return default_cf_handle_->cfd()->current()->storage_info()->NumLevelBytes(0);
+}
+
+void DBImpl::TEST_HandleWALFull() {
+  WriteContext write_context;
+  InstrumentedMutexLock l(&mutex_);
+  HandleWALFull(&write_context);
 }
 
 int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes(
@@ -176,6 +184,11 @@ Status DBImpl::TEST_GetLatestMutableCFOptions(
   auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family);
   *mutable_cf_options = *cfh->cfd()->GetLatestMutableCFOptions();
   return Status::OK();
+}
+
+int DBImpl::TEST_BGCompactionsAllowed() const {
+  InstrumentedMutexLock l(&mutex_);
+  return BGCompactionsAllowed();
 }
 
 }  // namespace rocksdb

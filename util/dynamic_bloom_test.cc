@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #ifndef GFLAGS
 #include <cstdio>
@@ -15,13 +17,14 @@ int main() {
 #define __STDC_FORMAT_MACROS
 #endif
 
+#include <gflags/gflags.h>
 #include <inttypes.h>
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <vector>
-#include <gflags/gflags.h>
 
 #include "dynamic_bloom.h"
 #include "port/port.h"
@@ -244,7 +247,7 @@ TEST_F(DynamicBloomTest, concurrent_with_perf) {
   uint32_t locality_limit = FLAGS_enable_perf ? 1 : 0;
 
   uint32_t num_threads = 4;
-  std::vector<std::thread> threads;
+  std::vector<port::Thread> threads;
 
   for (uint32_t m = 1; m <= m_limit; ++m) {
     for (uint32_t locality = 0; locality <= locality_limit; ++locality) {

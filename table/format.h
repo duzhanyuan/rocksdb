@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -15,14 +17,17 @@
 #include "rocksdb/options.h"
 #include "rocksdb/table.h"
 
-#include "port/port.h" // noexcept
-#include "table/persistent_cache_helper.h"
+#include "options/cf_options.h"
+#include "port/port.h"  // noexcept
+#include "table/persistent_cache_options.h"
 
 namespace rocksdb {
 
 class Block;
 class RandomAccessFile;
 struct ReadOptions;
+
+extern bool ShouldReportDetailedTime(Env* env, Statistics* stats);
 
 // the length of the magic number in bytes.
 const int kMagicNumberLengthByte = 8;
@@ -62,8 +67,8 @@ class BlockHandle {
   enum { kMaxEncodedLength = 10 + 10 };
 
  private:
-  uint64_t offset_ = 0;
-  uint64_t size_ = 0;
+  uint64_t offset_;
+  uint64_t size_;
 
   static const BlockHandle kNullBlockHandle;
 };
@@ -212,10 +217,9 @@ struct BlockContents {
 extern Status ReadBlockContents(
     RandomAccessFileReader* file, const Footer& footer,
     const ReadOptions& options, const BlockHandle& handle,
-    BlockContents* contents, Env* env, bool do_uncompress = true,
-    const Slice& compression_dict = Slice(),
-    const PersistentCacheOptions& cache_options = PersistentCacheOptions(),
-    Logger* info_log = nullptr);
+    BlockContents* contents, const ImmutableCFOptions &ioptions,
+    bool do_uncompress = true, const Slice& compression_dict = Slice(),
+    const PersistentCacheOptions& cache_options = PersistentCacheOptions());
 
 // The 'data' points to the raw block contents read in from file.
 // This method allocates a new heap buffer and the raw block
@@ -227,7 +231,8 @@ extern Status ReadBlockContents(
 extern Status UncompressBlockContents(const char* data, size_t n,
                                       BlockContents* contents,
                                       uint32_t compress_format_version,
-                                      const Slice& compression_dict);
+                                      const Slice& compression_dict,
+                                      const ImmutableCFOptions &ioptions);
 
 // This is an extension to UncompressBlockContents that accepts
 // a specific compression type. This is used by un-wrapped blocks
@@ -235,10 +240,13 @@ extern Status UncompressBlockContents(const char* data, size_t n,
 extern Status UncompressBlockContentsForCompressionType(
     const char* data, size_t n, BlockContents* contents,
     uint32_t compress_format_version, const Slice& compression_dict,
-    CompressionType compression_type);
+    CompressionType compression_type, const ImmutableCFOptions &ioptions);
 
 // Implementation details follow.  Clients should ignore,
 
+// TODO(andrewkr): we should prefer one way of representing a null/uninitialized
+// BlockHandle. Currently we use zeros for null and use negation-of-zeros for
+// uninitialized.
 inline BlockHandle::BlockHandle()
     : BlockHandle(~static_cast<uint64_t>(0),
                   ~static_cast<uint64_t>(0)) {

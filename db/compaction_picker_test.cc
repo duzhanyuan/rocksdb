@@ -2,12 +2,15 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
-#include "db/compaction.h"
 #include "db/compaction_picker.h"
 #include <limits>
 #include <string>
 #include <utility>
+#include "db/compaction.h"
+#include "db/compaction_picker_universal.h"
 
 #include "util/logging.h"
 #include "util/string_util.h"
@@ -48,7 +51,7 @@ class CompactionPickerTest : public testing::Test {
       : ucmp_(BytewiseComparator()),
         icmp_(ucmp_),
         ioptions_(options_),
-        mutable_cf_options_(options_, ioptions_),
+        mutable_cf_options_(options_),
         level_compaction_picker(ioptions_, &icmp_),
         cf_name_("dummy"),
         log_buffer_(InfoLogLevel::INFO_LEVEL, &logger_),
@@ -66,8 +69,8 @@ class CompactionPickerTest : public testing::Test {
   void NewVersionStorage(int num_levels, CompactionStyle style) {
     DeleteVersionStorage();
     options_.num_levels = num_levels;
-    vstorage_.reset(new VersionStorageInfo(
-        &icmp_, ucmp_, options_.num_levels, style, nullptr));
+    vstorage_.reset(new VersionStorageInfo(&icmp_, ucmp_, options_.num_levels,
+                                           style, nullptr, false));
     vstorage_->CalculateBaseBytes(ioptions_, mutable_cf_options_);
   }
 
@@ -115,12 +118,13 @@ class CompactionPickerTest : public testing::Test {
 
   void UpdateVersionStorageInfo() {
     vstorage_->CalculateBaseBytes(ioptions_, mutable_cf_options_);
-    vstorage_->UpdateFilesByCompactionPri(mutable_cf_options_);
+    vstorage_->UpdateFilesByCompactionPri(ioptions_.compaction_pri);
     vstorage_->UpdateNumNonEmptyLevels();
     vstorage_->GenerateFileIndexer();
     vstorage_->GenerateLevelFilesBrief();
-    vstorage_->ComputeCompactionScore(mutable_cf_options_);
+    vstorage_->ComputeCompactionScore(ioptions_, mutable_cf_options_);
     vstorage_->GenerateLevel0NonOverlapping();
+    vstorage_->ComputeFilesMarkedForCompaction();
     vstorage_->SetFinalized();
   }
 };
@@ -196,7 +200,7 @@ TEST_F(CompactionPickerTest, LevelMaxScore) {
   mutable_cf_options_.target_file_size_base = 10000000;
   mutable_cf_options_.target_file_size_multiplier = 10;
   mutable_cf_options_.max_bytes_for_level_base = 10 * 1024 * 1024;
-  Add(0, 1U, "150", "200", 1000000000U);
+  Add(0, 1U, "150", "200", 1000000U);
   // Level 1 score 1.2
   Add(1, 66U, "150", "200", 6000000U);
   Add(1, 88U, "201", "300", 6000000U);
@@ -350,10 +354,10 @@ TEST_F(CompactionPickerTest, Level0TriggerDynamic4) {
 TEST_F(CompactionPickerTest, LevelTriggerDynamic4) {
   int num_levels = ioptions_.num_levels;
   ioptions_.level_compaction_dynamic_level_bytes = true;
+  ioptions_.compaction_pri = kMinOverlappingRatio;
   mutable_cf_options_.level0_file_num_compaction_trigger = 2;
   mutable_cf_options_.max_bytes_for_level_base = 200;
   mutable_cf_options_.max_bytes_for_level_multiplier = 10;
-  mutable_cf_options_.compaction_pri = kMinOverlappingRatio;
   NewVersionStorage(num_levels, kCompactionStyleLevel);
   Add(0, 1U, "150", "200");
   Add(num_levels - 1, 3U, "200", "250", 300U);
@@ -489,10 +493,10 @@ TEST_F(CompactionPickerTest, NeedsCompactionFIFO) {
 
 TEST_F(CompactionPickerTest, CompactionPriMinOverlapping1) {
   NewVersionStorage(6, kCompactionStyleLevel);
+  ioptions_.compaction_pri = kMinOverlappingRatio;
   mutable_cf_options_.target_file_size_base = 10000000;
   mutable_cf_options_.target_file_size_multiplier = 10;
   mutable_cf_options_.max_bytes_for_level_base = 10 * 1024 * 1024;
-  mutable_cf_options_.compaction_pri = kMinOverlappingRatio;
 
   Add(2, 6U, "150", "179", 50000000U);
   Add(2, 7U, "180", "220", 50000000U);
@@ -516,10 +520,10 @@ TEST_F(CompactionPickerTest, CompactionPriMinOverlapping1) {
 
 TEST_F(CompactionPickerTest, CompactionPriMinOverlapping2) {
   NewVersionStorage(6, kCompactionStyleLevel);
+  ioptions_.compaction_pri = kMinOverlappingRatio;
   mutable_cf_options_.target_file_size_base = 10000000;
   mutable_cf_options_.target_file_size_multiplier = 10;
   mutable_cf_options_.max_bytes_for_level_base = 10 * 1024 * 1024;
-  mutable_cf_options_.compaction_pri = kMinOverlappingRatio;
 
   Add(2, 6U, "150", "175",
       60000000U);  // Overlaps with file 26, 27, total size 521M
@@ -546,9 +550,9 @@ TEST_F(CompactionPickerTest, CompactionPriMinOverlapping2) {
 
 TEST_F(CompactionPickerTest, CompactionPriMinOverlapping3) {
   NewVersionStorage(6, kCompactionStyleLevel);
+  ioptions_.compaction_pri = kMinOverlappingRatio;
   mutable_cf_options_.max_bytes_for_level_base = 10000000;
   mutable_cf_options_.max_bytes_for_level_multiplier = 10;
-  mutable_cf_options_.compaction_pri = kMinOverlappingRatio;
 
   // file 7 and 8 over lap with the same file, but file 8 is smaller so
   // it will be picked.
@@ -598,7 +602,7 @@ TEST_F(CompactionPickerTest, ParentIndexResetBug) {
 // ranges (with different sequence numbers) in the input files.
 TEST_F(CompactionPickerTest, OverlappingUserKeys) {
   NewVersionStorage(6, kCompactionStyleLevel);
-  mutable_cf_options_.compaction_pri = kByCompensatedSize;
+  ioptions_.compaction_pri = kByCompensatedSize;
 
   Add(1, 1U, "100", "150", 1U);
   // Overlapping user keys
@@ -621,9 +625,9 @@ TEST_F(CompactionPickerTest, OverlappingUserKeys2) {
   // Overlapping user keys on same level and output level
   Add(1, 1U, "200", "400", 1000000000U);
   Add(1, 2U, "400", "500", 1U, 0, 0);
-  Add(2, 3U, "400", "600", 1U);
-  // The following file is not in the compaction despite overlapping user keys
-  Add(2, 4U, "600", "700", 1U, 0, 0);
+  Add(2, 3U, "000", "100", 1U);
+  Add(2, 4U, "100", "600", 1U, 0, 0);
+  Add(2, 5U, "600", "700", 1U, 0, 0);
   UpdateVersionStorageInfo();
 
   std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
@@ -631,10 +635,12 @@ TEST_F(CompactionPickerTest, OverlappingUserKeys2) {
   ASSERT_TRUE(compaction.get() != nullptr);
   ASSERT_EQ(2U, compaction->num_input_levels());
   ASSERT_EQ(2U, compaction->num_input_files(0));
-  ASSERT_EQ(1U, compaction->num_input_files(1));
+  ASSERT_EQ(3U, compaction->num_input_files(1));
   ASSERT_EQ(1U, compaction->input(0, 0)->fd.GetNumber());
   ASSERT_EQ(2U, compaction->input(0, 1)->fd.GetNumber());
   ASSERT_EQ(3U, compaction->input(1, 0)->fd.GetNumber());
+  ASSERT_EQ(4U, compaction->input(1, 1)->fd.GetNumber());
+  ASSERT_EQ(5U, compaction->input(1, 2)->fd.GetNumber());
 }
 
 TEST_F(CompactionPickerTest, OverlappingUserKeys3) {
@@ -664,6 +670,159 @@ TEST_F(CompactionPickerTest, OverlappingUserKeys3) {
   ASSERT_EQ(5U, compaction->input(0, 4)->fd.GetNumber());
   ASSERT_EQ(6U, compaction->input(1, 0)->fd.GetNumber());
   ASSERT_EQ(7U, compaction->input(1, 1)->fd.GetNumber());
+}
+
+TEST_F(CompactionPickerTest, OverlappingUserKeys4) {
+  NewVersionStorage(6, kCompactionStyleLevel);
+  mutable_cf_options_.max_bytes_for_level_base = 1000000;
+
+  Add(1, 1U, "100", "150", 1U);
+  Add(1, 2U, "150", "199", 1U, 0, 0);
+  Add(1, 3U, "200", "250", 1100000U, 0, 0);
+  Add(1, 4U, "251", "300", 1U, 0, 0);
+  Add(1, 5U, "300", "350", 1U, 0, 0);
+
+  Add(2, 6U, "100", "115", 1U);
+  Add(2, 7U, "125", "325", 1U);
+  Add(2, 8U, "350", "400", 1U);
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+      cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_EQ(2U, compaction->num_input_levels());
+  ASSERT_EQ(1U, compaction->num_input_files(0));
+  ASSERT_EQ(1U, compaction->num_input_files(1));
+  ASSERT_EQ(3U, compaction->input(0, 0)->fd.GetNumber());
+  ASSERT_EQ(7U, compaction->input(1, 0)->fd.GetNumber());
+}
+
+TEST_F(CompactionPickerTest, OverlappingUserKeys5) {
+  NewVersionStorage(6, kCompactionStyleLevel);
+  // Overlapping user keys on same level and output level
+  Add(1, 1U, "200", "400", 1000000000U);
+  Add(1, 2U, "400", "500", 1U, 0, 0);
+  Add(2, 3U, "000", "100", 1U);
+  Add(2, 4U, "100", "600", 1U, 0, 0);
+  Add(2, 5U, "600", "700", 1U, 0, 0);
+
+  vstorage_->LevelFiles(2)[2]->being_compacted = true;
+
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+      cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() == nullptr);
+}
+
+TEST_F(CompactionPickerTest, OverlappingUserKeys6) {
+  NewVersionStorage(6, kCompactionStyleLevel);
+  // Overlapping user keys on same level and output level
+  Add(1, 1U, "200", "400", 1U, 0, 0);
+  Add(1, 2U, "401", "500", 1U, 0, 0);
+  Add(2, 3U, "000", "100", 1U);
+  Add(2, 4U, "100", "300", 1U, 0, 0);
+  Add(2, 5U, "305", "450", 1U, 0, 0);
+  Add(2, 6U, "460", "600", 1U, 0, 0);
+  Add(2, 7U, "600", "700", 1U, 0, 0);
+
+  vstorage_->LevelFiles(1)[0]->marked_for_compaction = true;
+  vstorage_->LevelFiles(1)[1]->marked_for_compaction = true;
+
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+      cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_EQ(2U, compaction->num_input_levels());
+  ASSERT_EQ(1U, compaction->num_input_files(0));
+  ASSERT_EQ(3U, compaction->num_input_files(1));
+}
+
+TEST_F(CompactionPickerTest, OverlappingUserKeys7) {
+  NewVersionStorage(6, kCompactionStyleLevel);
+  mutable_cf_options_.max_compaction_bytes = 100000000000u;
+  // Overlapping user keys on same level and output level
+  Add(1, 1U, "200", "400", 1U, 0, 0);
+  Add(1, 2U, "401", "500", 1000000000U, 0, 0);
+  Add(2, 3U, "100", "250", 1U);
+  Add(2, 4U, "300", "600", 1U, 0, 0);
+  Add(2, 5U, "600", "800", 1U, 0, 0);
+
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+      cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_EQ(2U, compaction->num_input_levels());
+  ASSERT_GE(1U, compaction->num_input_files(0));
+  ASSERT_GE(2U, compaction->num_input_files(1));
+  // File 5 has to be included in the compaction
+  ASSERT_EQ(5U, compaction->inputs(1)->back()->fd.GetNumber());
+}
+
+TEST_F(CompactionPickerTest, OverlappingUserKeys8) {
+  NewVersionStorage(6, kCompactionStyleLevel);
+  mutable_cf_options_.max_compaction_bytes = 100000000000u;
+  // grow the number of inputs in "level" without
+  // changing the number of "level+1" files we pick up
+  // Expand input level as much as possible
+  // no overlapping case
+  Add(1, 1U, "101", "150", 1U);
+  Add(1, 2U, "151", "200", 1U);
+  Add(1, 3U, "201", "300", 1000000000U);
+  Add(1, 4U, "301", "400", 1U);
+  Add(1, 5U, "401", "500", 1U);
+  Add(2, 6U, "150", "200", 1U);
+  Add(2, 7U, "200", "450", 1U, 0, 0);
+  Add(2, 8U, "500", "600", 1U);
+
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+      cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_EQ(2U, compaction->num_input_levels());
+  ASSERT_EQ(3U, compaction->num_input_files(0));
+  ASSERT_EQ(2U, compaction->num_input_files(1));
+  ASSERT_EQ(2U, compaction->input(0, 0)->fd.GetNumber());
+  ASSERT_EQ(3U, compaction->input(0, 1)->fd.GetNumber());
+  ASSERT_EQ(4U, compaction->input(0, 2)->fd.GetNumber());
+  ASSERT_EQ(6U, compaction->input(1, 0)->fd.GetNumber());
+  ASSERT_EQ(7U, compaction->input(1, 1)->fd.GetNumber());
+}
+
+TEST_F(CompactionPickerTest, OverlappingUserKeys9) {
+  NewVersionStorage(6, kCompactionStyleLevel);
+  mutable_cf_options_.max_compaction_bytes = 100000000000u;
+  // grow the number of inputs in "level" without
+  // changing the number of "level+1" files we pick up
+  // Expand input level as much as possible
+  // overlapping case
+  Add(1, 1U, "121", "150", 1U);
+  Add(1, 2U, "151", "200", 1U);
+  Add(1, 3U, "201", "300", 1000000000U);
+  Add(1, 4U, "301", "400", 1U);
+  Add(1, 5U, "401", "500", 1U);
+  Add(2, 6U, "100", "120", 1U);
+  Add(2, 7U, "150", "200", 1U);
+  Add(2, 8U, "200", "450", 1U, 0, 0);
+  Add(2, 9U, "501", "600", 1U);
+
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+      cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_EQ(2U, compaction->num_input_levels());
+  ASSERT_EQ(5U, compaction->num_input_files(0));
+  ASSERT_EQ(2U, compaction->num_input_files(1));
+  ASSERT_EQ(1U, compaction->input(0, 0)->fd.GetNumber());
+  ASSERT_EQ(2U, compaction->input(0, 1)->fd.GetNumber());
+  ASSERT_EQ(3U, compaction->input(0, 2)->fd.GetNumber());
+  ASSERT_EQ(4U, compaction->input(0, 3)->fd.GetNumber());
+  ASSERT_EQ(7U, compaction->input(1, 0)->fd.GetNumber());
+  ASSERT_EQ(8U, compaction->input(1, 1)->fd.GetNumber());
 }
 
 TEST_F(CompactionPickerTest, NotScheduleL1IfL0WithHigherPri1) {
@@ -854,7 +1013,8 @@ TEST_F(CompactionPickerTest, EstimateCompactionBytesNeededDynamicLevel) {
 
   // Set Last level size 50000
   // num_levels - 1 target 5000
-  // num_levels - 2 is base level with taret 500
+  // num_levels - 2 is base level with target 1000 (rounded up to
+  // max_bytes_for_level_base).
   Add(num_levels - 1, 10U, "400", "500", 50000);
 
   Add(0, 1U, "150", "200", 200);
@@ -863,16 +1023,16 @@ TEST_F(CompactionPickerTest, EstimateCompactionBytesNeededDynamicLevel) {
   Add(0, 5U, "150", "200", 200);
   Add(0, 6U, "150", "200", 200);
   // num_levels - 3 is over target by 100 + 1000
-  Add(num_levels - 3, 7U, "400", "500", 300);
-  Add(num_levels - 3, 8U, "600", "700", 300);
+  Add(num_levels - 3, 7U, "400", "500", 550);
+  Add(num_levels - 3, 8U, "600", "700", 550);
   // num_levels - 2 is over target by 1100 + 200
   Add(num_levels - 2, 9U, "150", "200", 5200);
 
   UpdateVersionStorageInfo();
 
-  // Merging to the second last level: (5200 / 1600 + 1) * 1100
+  // Merging to the second last level: (5200 / 2100 + 1) * 1100
   // Merging to the last level: (50000 / 6300 + 1) * 1300
-  ASSERT_EQ(1600u + 4675u + 11617u,
+  ASSERT_EQ(2100u + 3823u + 11617u,
             vstorage_->estimated_compaction_needed_bytes());
 }
 
@@ -1032,6 +1192,101 @@ TEST_F(CompactionPickerTest, IsBottommostLevelTest) {
   ASSERT_FALSE(result);
 
   DeleteVersionStorage();
+}
+
+TEST_F(CompactionPickerTest, MaxCompactionBytesHit) {
+  mutable_cf_options_.max_bytes_for_level_base = 1000000u;
+  mutable_cf_options_.max_compaction_bytes = 800000u;
+  ioptions_.level_compaction_dynamic_level_bytes = false;
+  NewVersionStorage(6, kCompactionStyleLevel);
+  // A compaction should be triggered and pick file 2 and 5.
+  // It can expand because adding file 1 and 3, the compaction size will
+  // exceed mutable_cf_options_.max_bytes_for_level_base.
+  Add(1, 1U, "100", "150", 300000U);
+  Add(1, 2U, "151", "200", 300001U, 0, 0);
+  Add(1, 3U, "201", "250", 300000U, 0, 0);
+  Add(1, 4U, "251", "300", 300000U, 0, 0);
+  Add(2, 5U, "100", "256", 1U);
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+      cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_EQ(2U, compaction->num_input_levels());
+  ASSERT_EQ(1U, compaction->num_input_files(0));
+  ASSERT_EQ(1U, compaction->num_input_files(1));
+  ASSERT_EQ(2U, compaction->input(0, 0)->fd.GetNumber());
+  ASSERT_EQ(5U, compaction->input(1, 0)->fd.GetNumber());
+}
+
+TEST_F(CompactionPickerTest, MaxCompactionBytesNotHit) {
+  mutable_cf_options_.max_bytes_for_level_base = 800000u;
+  mutable_cf_options_.max_compaction_bytes = 1000000u;
+  ioptions_.level_compaction_dynamic_level_bytes = false;
+  NewVersionStorage(6, kCompactionStyleLevel);
+  // A compaction should be triggered and pick file 2 and 5.
+  // and it expands to file 1 and 3 too.
+  Add(1, 1U, "100", "150", 300000U);
+  Add(1, 2U, "151", "200", 300001U, 0, 0);
+  Add(1, 3U, "201", "250", 300000U, 0, 0);
+  Add(1, 4U, "251", "300", 300000U, 0, 0);
+  Add(2, 5U, "000", "251", 1U);
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+      cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_EQ(2U, compaction->num_input_levels());
+  ASSERT_EQ(3U, compaction->num_input_files(0));
+  ASSERT_EQ(1U, compaction->num_input_files(1));
+  ASSERT_EQ(1U, compaction->input(0, 0)->fd.GetNumber());
+  ASSERT_EQ(2U, compaction->input(0, 1)->fd.GetNumber());
+  ASSERT_EQ(3U, compaction->input(0, 2)->fd.GetNumber());
+  ASSERT_EQ(5U, compaction->input(1, 0)->fd.GetNumber());
+}
+
+TEST_F(CompactionPickerTest, IsTrivialMoveOn) {
+  mutable_cf_options_.max_bytes_for_level_base = 10000u;
+  mutable_cf_options_.max_compaction_bytes = 10001u;
+  ioptions_.level_compaction_dynamic_level_bytes = false;
+  NewVersionStorage(6, kCompactionStyleLevel);
+  // A compaction should be triggered and pick file 2
+  Add(1, 1U, "100", "150", 3000U);
+  Add(1, 2U, "151", "200", 3001U);
+  Add(1, 3U, "201", "250", 3000U);
+  Add(1, 4U, "251", "300", 3000U);
+
+  Add(3, 5U, "120", "130", 7000U);
+  Add(3, 6U, "170", "180", 7000U);
+  Add(3, 5U, "220", "230", 7000U);
+  Add(3, 5U, "270", "280", 7000U);
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+    cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_TRUE(compaction->IsTrivialMove());
+}
+
+TEST_F(CompactionPickerTest, IsTrivialMoveOff) {
+  mutable_cf_options_.max_bytes_for_level_base = 1000000u;
+  mutable_cf_options_.max_compaction_bytes = 10000u;
+  ioptions_.level_compaction_dynamic_level_bytes = false;
+  NewVersionStorage(6, kCompactionStyleLevel);
+  // A compaction should be triggered and pick all files from level 1
+  Add(1, 1U, "100", "150", 300000U, 0, 0);
+  Add(1, 2U, "150", "200", 300000U, 0, 0);
+  Add(1, 3U, "200", "250", 300000U, 0, 0);
+  Add(1, 4U, "250", "300", 300000U, 0, 0);
+
+  Add(3, 5U, "120", "130", 6000U);
+  Add(3, 6U, "140", "150", 6000U);
+  UpdateVersionStorageInfo();
+
+  std::unique_ptr<Compaction> compaction(level_compaction_picker.PickCompaction(
+    cf_name_, mutable_cf_options_, vstorage_.get(), &log_buffer_));
+  ASSERT_TRUE(compaction.get() != nullptr);
+  ASSERT_FALSE(compaction->IsTrivialMove());
 }
 
 }  // namespace rocksdb

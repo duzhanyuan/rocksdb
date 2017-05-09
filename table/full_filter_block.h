@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #pragma once
 
@@ -45,7 +47,12 @@ class FullFilterBlockBuilder : public FilterBlockBuilder {
   virtual bool IsBlockBased() override { return false; }
   virtual void StartBlock(uint64_t block_offset) override {}
   virtual void Add(const Slice& key) override;
-  virtual Slice Finish() override;
+  virtual Slice Finish(const BlockHandle& tmp, Status* status) override;
+  using FilterBlockBuilder::Finish;
+
+ protected:
+  virtual void AddKey(const Slice& key);
+  std::unique_ptr<FilterBitsBuilder> filter_bits_builder_;
 
  private:
   // important: all of these might point to invalid addresses
@@ -55,10 +62,8 @@ class FullFilterBlockBuilder : public FilterBlockBuilder {
   bool whole_key_filtering_;
 
   uint32_t num_added_;
-  std::unique_ptr<FilterBitsBuilder> filter_bits_builder_;
   std::unique_ptr<const char[]> filter_data_;
 
-  void AddKey(const Slice& key);
   void AddPrefix(const Slice& key);
 
   // No copying allowed
@@ -88,24 +93,26 @@ class FullFilterBlockReader : public FilterBlockReader {
   ~FullFilterBlockReader() {}
 
   virtual bool IsBlockBased() override { return false; }
-  virtual bool KeyMayMatch(const Slice& key,
-                           uint64_t block_offset = kNotValid) override;
-  virtual bool PrefixMayMatch(const Slice& prefix,
-                              uint64_t block_offset = kNotValid) override;
+  virtual bool KeyMayMatch(
+      const Slice& key, uint64_t block_offset = kNotValid,
+      const bool no_io = false,
+      const Slice* const const_ikey_ptr = nullptr) override;
+  virtual bool PrefixMayMatch(
+      const Slice& prefix, uint64_t block_offset = kNotValid,
+      const bool no_io = false,
+      const Slice* const const_ikey_ptr = nullptr) override;
   virtual size_t ApproximateMemoryUsage() const override;
 
  private:
   const SliceTransform* prefix_extractor_;
-
-  std::unique_ptr<FilterBitsReader> filter_bits_reader_;
   Slice contents_;
+  std::unique_ptr<FilterBitsReader> filter_bits_reader_;
   BlockContents block_contents_;
   std::unique_ptr<const char[]> filter_data_;
 
-  bool MayMatch(const Slice& entry);
-
   // No copying allowed
   FullFilterBlockReader(const FullFilterBlockReader&);
+  bool MayMatch(const Slice& entry);
   void operator=(const FullFilterBlockReader&);
 };
 

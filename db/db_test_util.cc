@@ -8,6 +8,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/db_test_util.h"
+#include "db/forward_iterator.h"
 
 namespace rocksdb {
 
@@ -19,7 +20,7 @@ SpecialEnv::SpecialEnv(Env* base)
       sleep_counter_(this),
       addon_time_(0),
       time_elapse_only_sleep_(false),
-      no_sleep_(false) {
+      no_slowdown_(false) {
   delay_sstable_sync_.store(false, std::memory_order_release);
   drop_writes_.store(false, std::memory_order_release);
   no_space_.store(false, std::memory_order_release);
@@ -30,6 +31,8 @@ SpecialEnv::SpecialEnv(Env* base)
   manifest_write_error_.store(false, std::memory_order_release);
   log_write_error_.store(false, std::memory_order_release);
   random_file_open_counter_.store(0, std::memory_order_relaxed);
+  delete_count_.store(0, std::memory_order_relaxed);
+  num_open_wal_file_.store(0);
   log_write_slowdown_ = 0;
   bytes_written_ = 0;
   sync_counter_ = 0;
@@ -49,6 +52,7 @@ DBTestBase::DBTestBase(const std::string path)
   alternative_wal_dir_ = dbname_ + "/wal";
   alternative_db_log_dir_ = dbname_ + "/db_log_dir";
   auto options = CurrentOptions();
+  options.env = env_;
   auto delete_options = options;
   delete_options.wal_dir = alternative_wal_dir_;
   EXPECT_OK(DestroyDB(dbname_, delete_options));
@@ -69,7 +73,13 @@ DBTestBase::~DBTestBase() {
   options.db_paths.emplace_back(dbname_ + "_2", 0);
   options.db_paths.emplace_back(dbname_ + "_3", 0);
   options.db_paths.emplace_back(dbname_ + "_4", 0);
-  EXPECT_OK(DestroyDB(dbname_, options));
+  options.env = env_;
+
+  if (getenv("KEEP_DB")) {
+    printf("DB is still at %s\n", dbname_.c_str());
+  } else {
+    EXPECT_OK(DestroyDB(dbname_, options));
+  }
   delete env_;
 }
 
@@ -183,6 +193,36 @@ bool DBTestBase::ChangeCompactOptions() {
   }
 }
 
+// Switch between different WAL settings
+bool DBTestBase::ChangeWalOptions() {
+  if (option_config_ == kDefault) {
+    option_config_ = kDBLogDir;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    Destroy(options);
+    options.create_if_missing = true;
+    TryReopen(options);
+    return true;
+  } else if (option_config_ == kDBLogDir) {
+    option_config_ = kWalDirAndMmapReads;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    Destroy(options);
+    options.create_if_missing = true;
+    TryReopen(options);
+    return true;
+  } else if (option_config_ == kWalDirAndMmapReads) {
+    option_config_ = kRecycleLogFiles;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    Destroy(options);
+    TryReopen(options);
+    return true;
+  } else {
+    return false;
+  }
+}
+
 // Switch between different filter policy
 // Jump from kDefault to kFilter to kFullFilter
 bool DBTestBase::ChangeFilterOptions() {
@@ -190,6 +230,8 @@ bool DBTestBase::ChangeFilterOptions() {
     option_config_ = kFilter;
   } else if (option_config_ == kFilter) {
     option_config_ = kFullFilterWithNewTableReaderForCompactions;
+  } else if (option_config_ == kFullFilterWithNewTableReaderForCompactions) {
+    option_config_ = kPartitionedFilterWithNewTableReaderForCompactions;
   } else {
     return false;
   }
@@ -221,9 +263,6 @@ Options DBTestBase::CurrentOptions(
     const anon::OptionsOverride& options_override) {
   // this redundant copy is to minimize code change w/o having lint error.
   Options options = defaultOptions;
-  XFUNC_TEST("", "dbtest_options", inplace_options1, GetXFTestOptions,
-             reinterpret_cast<Options*>(&options),
-             options_override.skip_policy);
   BlockBasedTableOptions table_options;
   bool set_block_based_table_factory = true;
   switch (option_config_) {
@@ -231,6 +270,7 @@ Options DBTestBase::CurrentOptions(
     case kHashSkipList:
       options.prefix_extractor.reset(NewFixedPrefixTransform(1));
       options.memtable_factory.reset(NewHashSkipListRepFactory(16));
+      options.allow_concurrent_memtable_write = false;
       break;
     case kPlainTableFirstBytePrefix:
       options.table_factory.reset(new PlainTableFactory());
@@ -262,15 +302,18 @@ Options DBTestBase::CurrentOptions(
       break;
     case kVectorRep:
       options.memtable_factory.reset(new VectorRepFactory(100));
+      options.allow_concurrent_memtable_write = false;
       break;
     case kHashLinkList:
       options.prefix_extractor.reset(NewFixedPrefixTransform(1));
       options.memtable_factory.reset(
           NewHashLinkListRepFactory(4, 0, 3, true, 4));
+      options.allow_concurrent_memtable_write = false;
       break;
     case kHashCuckoo:
       options.memtable_factory.reset(
           NewHashCuckooRepFactory(options.write_buffer_size));
+      options.allow_concurrent_memtable_write = false;
       break;
 #endif  // ROCKSDB_LITE
     case kMergePut:
@@ -281,6 +324,14 @@ Options DBTestBase::CurrentOptions(
       break;
     case kFullFilterWithNewTableReaderForCompactions:
       table_options.filter_policy.reset(NewBloomFilterPolicy(10, false));
+      options.new_table_reader_for_compaction_inputs = true;
+      options.compaction_readahead_size = 10 * 1024 * 1024;
+      break;
+    case kPartitionedFilterWithNewTableReaderForCompactions:
+      table_options.filter_policy.reset(NewBloomFilterPolicy(10, false));
+      table_options.partition_filters = true;
+      table_options.index_type =
+          BlockBasedTableOptions::IndexType::kTwoLevelIndexSearch;
       options.new_table_reader_for_compaction_inputs = true;
       options.compaction_readahead_size = 10 * 1024 * 1024;
       break;
@@ -301,6 +352,7 @@ Options DBTestBase::CurrentOptions(
       break;
     case kManifestFileSize:
       options.max_manifest_file_size = 50;  // 50 bytes
+      break;
     case kPerfOptions:
       options.soft_rate_limit = 2.0;
       options.delayed_write_rate = 8 * 1024 * 1024;
@@ -337,6 +389,11 @@ Options DBTestBase::CurrentOptions(
     }
     case kBlockBasedTableWithWholeKeyHashIndex: {
       table_options.index_type = BlockBasedTableOptions::kHashSearch;
+      options.prefix_extractor.reset(NewNoopTransform());
+      break;
+    }
+    case kBlockBasedTableWithPartitionedIndex: {
+      table_options.index_type = BlockBasedTableOptions::kTwoLevelIndexSearch;
       options.prefix_extractor.reset(NewNoopTransform());
       break;
     }
@@ -379,6 +436,8 @@ Options DBTestBase::CurrentOptions(
 
   if (options_override.filter_policy) {
     table_options.filter_policy = options_override.filter_policy;
+    table_options.partition_filters = options_override.partition_filters;
+    table_options.metadata_block_size = options_override.metadata_block_size;
   }
   if (set_block_based_table_factory) {
     options.table_factory.reset(NewBlockBasedTableFactory(table_options));
@@ -442,7 +501,7 @@ void DBTestBase::Reopen(const Options& options) {
 
 void DBTestBase::Close() {
   for (auto h : handles_) {
-    delete h;
+    db_->DestroyColumnFamilyHandle(h);
   }
   handles_.clear();
   delete db_;
@@ -466,8 +525,31 @@ Status DBTestBase::ReadOnlyReopen(const Options& options) {
 
 Status DBTestBase::TryReopen(const Options& options) {
   Close();
+  last_options_.table_factory.reset();
+  // Note: operator= is an unsafe approach here since it destructs shared_ptr in
+  // the same order of their creation, in contrast to destructors which
+  // destructs them in the opposite order of creation. One particular problme is
+  // that the cache destructor might invoke callback functions that use Option
+  // members such as statistics. To work around this problem, we manually call
+  // destructor of table_facotry which eventually clears the block cache.
   last_options_ = options;
   return DB::Open(options, dbname_, &db_);
+}
+
+bool DBTestBase::IsDirectIOSupported() {
+  EnvOptions env_options;
+  env_options.use_mmap_writes = false;
+  env_options.use_direct_writes = true;
+  std::string tmp = TempFileName(dbname_, 999);
+  Status s;
+  {
+    unique_ptr<WritableFile> file;
+    s = env_->NewWritableFile(tmp, &file, env_options);
+  }
+  if (s.ok()) {
+    s = env_->DeleteFile(tmp);
+  }
+  return s.ok();
 }
 
 Status DBTestBase::Flush(int cf) {
@@ -493,6 +575,15 @@ Status DBTestBase::Put(int cf, const Slice& k, const Slice& v,
   } else {
     return db_->Put(wo, handles_[cf], k, v);
   }
+}
+
+Status DBTestBase::Merge(const Slice& k, const Slice& v, WriteOptions wo) {
+  return db_->Merge(wo, k, v);
+}
+
+Status DBTestBase::Merge(int cf, const Slice& k, const Slice& v,
+                         WriteOptions wo) {
+  return db_->Merge(wo, handles_[cf], k, v);
 }
 
 Status DBTestBase::Delete(const std::string& k) {
@@ -583,11 +674,15 @@ std::string DBTestBase::Contents(int cf) {
 
 std::string DBTestBase::AllEntriesFor(const Slice& user_key, int cf) {
   Arena arena;
+  auto options = CurrentOptions();
+  InternalKeyComparator icmp(options.comparator);
+  RangeDelAggregator range_del_agg(icmp, {} /* snapshots */);
   ScopedArenaIterator iter;
   if (cf == 0) {
-    iter.set(dbfull()->NewInternalIterator(&arena));
+    iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg));
   } else {
-    iter.set(dbfull()->NewInternalIterator(&arena, handles_[cf]));
+    iter.set(
+        dbfull()->NewInternalIterator(&arena, &range_del_agg, handles_[cf]));
   }
   InternalKey target(user_key, kMaxSequenceNumber, kTypeValue);
   iter->Seek(target.Encode());
@@ -730,7 +825,7 @@ double DBTestBase::CompressionRatioAtLevel(int level, int cf) {
 
 int DBTestBase::TotalTableFiles(int cf, int levels) {
   if (levels == -1) {
-    levels = CurrentOptions().num_levels;
+    levels = (cf == 0) ? db_->NumberLevels() : db_->NumberLevels(handles_[1]);
   }
   int result = 0;
   for (int level = 0; level < levels; level++) {
@@ -988,10 +1083,14 @@ UpdateStatus DBTestBase::updateInPlaceNoAction(char* prevValue,
 void DBTestBase::validateNumberOfEntries(int numValues, int cf) {
   ScopedArenaIterator iter;
   Arena arena;
+  auto options = CurrentOptions();
+  InternalKeyComparator icmp(options.comparator);
+  RangeDelAggregator range_del_agg(icmp, {} /* snapshots */);
   if (cf != 0) {
-    iter.set(dbfull()->NewInternalIterator(&arena, handles_[cf]));
+    iter.set(
+        dbfull()->NewInternalIterator(&arena, &range_del_agg, handles_[cf]));
   } else {
-    iter.set(dbfull()->NewInternalIterator(&arena));
+    iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg));
   }
   iter->SeekToFirst();
   ASSERT_EQ(iter->status().ok(), true);
@@ -1074,35 +1173,139 @@ std::vector<std::uint64_t> DBTestBase::ListTableFiles(Env* env,
   return file_numbers;
 }
 
-#ifndef ROCKSDB_LITE
+void DBTestBase::VerifyDBFromMap(std::map<std::string, std::string> true_data,
+                                 size_t* total_reads_res, bool tailing_iter,
+                                 std::map<std::string, Status> status) {
+  size_t total_reads = 0;
 
-Status DBTestBase::GenerateAndAddExternalFile(const Options options,
-                                              std::vector<int> keys,
-                                              size_t file_id) {
-  std::string file_path =
-      test::TmpDir(env_) + "/sst_files/" + ToString(file_id);
-  SstFileWriter sst_file_writer(EnvOptions(), options, options.comparator);
-
-  Status s = sst_file_writer.Open(file_path);
-  if (!s.ok()) {
-    return s;
-  }
-  for (auto& entry : keys) {
-    std::string k = Key(entry);
-    std::string v = k + ToString(file_id);
-    s = sst_file_writer.Add(k, v);
-    if (!s.ok()) {
-      return s;
+  for (auto& kv : true_data) {
+    Status s = status[kv.first];
+    if (s.ok()) {
+      ASSERT_EQ(Get(kv.first), kv.second);
+    } else {
+      std::string value;
+      ASSERT_EQ(s, db_->Get(ReadOptions(), kv.first, &value));
     }
-  }
-  s = sst_file_writer.Finish();
-
-  if (s.ok()) {
-    s = db_->AddFile(file_path);
+    total_reads++;
   }
 
-  return s;
+  // Normal Iterator
+  {
+    int iter_cnt = 0;
+    ReadOptions ro;
+    ro.total_order_seek = true;
+    Iterator* iter = db_->NewIterator(ro);
+    // Verify Iterator::Next()
+    iter_cnt = 0;
+    auto data_iter = true_data.begin();
+    Status s;
+    for (iter->SeekToFirst(); iter->Valid(); iter->Next(), data_iter++) {
+      ASSERT_EQ(iter->key().ToString(), data_iter->first);
+      Status current_status = status[data_iter->first];
+      if (!current_status.ok()) {
+        s = current_status;
+      }
+      ASSERT_EQ(iter->status(), s);
+      if (current_status.ok()) {
+        ASSERT_EQ(iter->value().ToString(), data_iter->second);
+      }
+      iter_cnt++;
+      total_reads++;
+    }
+    ASSERT_EQ(data_iter, true_data.end()) << iter_cnt << " / "
+                                          << true_data.size();
+    delete iter;
+
+    // Verify Iterator::Prev()
+    // Use a new iterator to make sure its status is clean.
+    iter = db_->NewIterator(ro);
+    iter_cnt = 0;
+    s = Status::OK();
+    auto data_rev = true_data.rbegin();
+    for (iter->SeekToLast(); iter->Valid(); iter->Prev(), data_rev++) {
+      ASSERT_EQ(iter->key().ToString(), data_rev->first);
+      Status current_status = status[data_rev->first];
+      if (!current_status.ok()) {
+        s = current_status;
+      }
+      ASSERT_EQ(iter->status(), s);
+      if (current_status.ok()) {
+        ASSERT_EQ(iter->value().ToString(), data_rev->second);
+      }
+      iter_cnt++;
+      total_reads++;
+    }
+    ASSERT_EQ(data_rev, true_data.rend()) << iter_cnt << " / "
+                                          << true_data.size();
+
+    // Verify Iterator::Seek()
+    for (auto kv : true_data) {
+      iter->Seek(kv.first);
+      ASSERT_EQ(kv.first, iter->key().ToString());
+      ASSERT_EQ(kv.second, iter->value().ToString());
+      total_reads++;
+    }
+    delete iter;
+  }
+
+  if (tailing_iter) {
+#ifndef ROCKSDB_LITE
+    // Tailing iterator
+    int iter_cnt = 0;
+    ReadOptions ro;
+    ro.tailing = true;
+    ro.total_order_seek = true;
+    Iterator* iter = db_->NewIterator(ro);
+
+    // Verify ForwardIterator::Next()
+    iter_cnt = 0;
+    auto data_iter = true_data.begin();
+    for (iter->SeekToFirst(); iter->Valid(); iter->Next(), data_iter++) {
+      ASSERT_EQ(iter->key().ToString(), data_iter->first);
+      ASSERT_EQ(iter->value().ToString(), data_iter->second);
+      iter_cnt++;
+      total_reads++;
+    }
+    ASSERT_EQ(data_iter, true_data.end()) << iter_cnt << " / "
+                                          << true_data.size();
+
+    // Verify ForwardIterator::Seek()
+    for (auto kv : true_data) {
+      iter->Seek(kv.first);
+      ASSERT_EQ(kv.first, iter->key().ToString());
+      ASSERT_EQ(kv.second, iter->value().ToString());
+      total_reads++;
+    }
+
+    delete iter;
+#endif  // ROCKSDB_LITE
+  }
+
+  if (total_reads_res) {
+    *total_reads_res = total_reads;
+  }
 }
+
+void DBTestBase::VerifyDBInternal(
+    std::vector<std::pair<std::string, std::string>> true_data) {
+  Arena arena;
+  InternalKeyComparator icmp(last_options_.comparator);
+  RangeDelAggregator range_del_agg(icmp, {});
+  auto iter = dbfull()->NewInternalIterator(&arena, &range_del_agg);
+  iter->SeekToFirst();
+  for (auto p : true_data) {
+    ASSERT_TRUE(iter->Valid());
+    ParsedInternalKey ikey;
+    ASSERT_TRUE(ParseInternalKey(iter->key(), &ikey));
+    ASSERT_EQ(p.first, ikey.user_key);
+    ASSERT_EQ(p.second, iter->value());
+    iter->Next();
+  };
+  ASSERT_FALSE(iter->Valid());
+  iter->~InternalIterator();
+}
+
+#ifndef ROCKSDB_LITE
 
 uint64_t DBTestBase::GetNumberOfSstFilesForColumnFamily(
     DB* db, std::string column_family_name) {

@@ -2,9 +2,12 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #ifndef ROCKSDB_LITE
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,7 +16,9 @@
 #include "db/write_callback.h"
 #include "rocksdb/db.h"
 #include "rocksdb/write_batch.h"
+#include "port/port.h"
 #include "util/logging.h"
+#include "util/random.h"
 #include "util/sync_point.h"
 #include "util/testharness.h"
 
@@ -240,7 +245,7 @@ TEST_F(WriteCallbackTest, WriteWithCallbackTest) {
           rocksdb::SyncPoint::GetInstance()->EnableProcessing();
 
           // do all the writes
-          std::vector<std::thread> threads;
+          std::vector<port::Thread> threads;
           for (uint32_t i = 0; i < write_group.size(); i++) {
             threads.emplace_back(write_with_callback_func);
           }

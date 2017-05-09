@@ -2,15 +2,18 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 #pragma once
+#include <atomic>
 #include <string>
+#include "port/port.h"
 #include "rocksdb/env.h"
 #include "util/aligned_buffer.h"
-#include "port/port.h"
 
 namespace rocksdb {
 
@@ -23,10 +26,11 @@ std::unique_ptr<RandomAccessFile> NewReadaheadRandomAccessFile(
 class SequentialFileReader {
  private:
   std::unique_ptr<SequentialFile> file_;
+  std::atomic<size_t> offset_;  // read offset
 
  public:
   explicit SequentialFileReader(std::unique_ptr<SequentialFile>&& _file)
-      : file_(std::move(_file)) {}
+      : file_(std::move(_file)), offset_(0) {}
 
   SequentialFileReader(SequentialFileReader&& o) ROCKSDB_NOEXCEPT {
     *this = std::move(o);
@@ -45,6 +49,11 @@ class SequentialFileReader {
   Status Skip(uint64_t n);
 
   SequentialFile* file() { return file_.get(); }
+
+  bool use_direct_io() const { return file_->use_direct_io(); }
+
+ protected:
+  Status DirectRead(size_t n, Slice* result, char* scratch);
 };
 
 class RandomAccessFileReader {
@@ -85,7 +94,17 @@ class RandomAccessFileReader {
 
   Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const;
 
+  Status Prefetch(uint64_t offset, size_t n) const {
+    return file_->Prefetch(offset, n);
+  }
+
   RandomAccessFile* file() { return file_.get(); }
+
+  bool use_direct_io() const { return file_->use_direct_io(); }
+
+ protected:
+  Status DirectRead(uint64_t offset, size_t n, Slice* result,
+                    char* scratch) const;
 };
 
 // Use posix write to write data to a file.
@@ -102,31 +121,28 @@ class WritableFileWriter {
   // so we need to go back and write that page again
   uint64_t                next_write_offset_;
   bool                    pending_sync_;
-  bool                    pending_fsync_;
-  const bool              direct_io_;
-  const bool              use_os_buffer_;
   uint64_t                last_sync_size_;
   uint64_t                bytes_per_sync_;
   RateLimiter*            rate_limiter_;
+  Statistics* stats_;
 
  public:
   WritableFileWriter(std::unique_ptr<WritableFile>&& file,
-                     const EnvOptions& options)
+                     const EnvOptions& options, Statistics* stats = nullptr)
       : writable_file_(std::move(file)),
         buf_(),
         max_buffer_size_(options.writable_file_max_buffer_size),
         filesize_(0),
         next_write_offset_(0),
         pending_sync_(false),
-        pending_fsync_(false),
-        direct_io_(writable_file_->UseDirectIO()),
-        use_os_buffer_(writable_file_->UseOSBuffer()),
         last_sync_size_(0),
         bytes_per_sync_(options.bytes_per_sync),
-        rate_limiter_(options.rate_limiter) {
-
+        rate_limiter_(options.rate_limiter),
+        stats_(stats) {
     buf_.Alignment(writable_file_->GetRequiredBufferAlignment());
-    buf_.AllocateNewBuffer(65536);
+    buf_.AllocateNewBuffer(use_direct_io()
+                               ? max_buffer_size_
+                               : std::min((size_t)65536, max_buffer_size_));
   }
 
   WritableFileWriter(const WritableFileWriter&) = delete;
@@ -156,10 +172,14 @@ class WritableFileWriter {
 
   WritableFile* writable_file() const { return writable_file_.get(); }
 
+  bool use_direct_io() { return writable_file_->use_direct_io(); }
+
  private:
   // Used when os buffering is OFF and we are writing
-  // DMA such as in Windows unbuffered mode
-  Status WriteUnbuffered();
+  // DMA such as in Direct I/O mode
+#ifndef ROCKSDB_LITE
+  Status WriteDirect();
+#endif  // !ROCKSDB_LITE
   // Normal write
   Status WriteBuffered(const char* data, size_t size);
   Status RangeSync(uint64_t offset, uint64_t nbytes);

@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 
 #ifndef ROCKSDB_LITE
@@ -9,15 +11,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include "db/memtable.h"
+#include "memtable/skiplist.h"
+#include "monitoring/histogram.h"
+#include "port/port.h"
 #include "rocksdb/memtablerep.h"
-#include "util/arena.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/slice_transform.h"
-#include "port/port.h"
-#include "util/histogram.h"
+#include "util/arena.h"
 #include "util/murmurhash.h"
-#include "db/memtable.h"
-#include "db/skiplist.h"
 
 namespace rocksdb {
 namespace {
@@ -247,8 +249,18 @@ class HashLinkListRep : public MemTableRep {
     return (n != nullptr) && (compare_(n->key, key) < 0);
   }
 
+  bool KeyIsAfterOrAtNode(const Slice& internal_key, const Node* n) const {
+    // nullptr n is considered infinite
+    return (n != nullptr) && (compare_(n->key, internal_key) <= 0);
+  }
+
+  bool KeyIsAfterOrAtNode(const Key& key, const Node* n) const {
+    // nullptr n is considered infinite
+    return (n != nullptr) && (compare_(n->key, key) <= 0);
+  }
 
   Node* FindGreaterOrEqualInBucket(Node* head, const Slice& key) const;
+  Node* FindLessOrEqualInBucket(Node* head, const Slice& key) const;
 
   class FullListIterator : public MemTableRep::Iterator {
    public:
@@ -289,6 +301,15 @@ class HashLinkListRep : public MemTableRep {
           (memtable_key != nullptr) ?
               memtable_key : EncodeKey(&tmp_, internal_key);
       iter_.Seek(encoded_key);
+    }
+
+    // Retreat to the last entry with a key <= target
+    virtual void SeekForPrev(const Slice& internal_key,
+                             const char* memtable_key) override {
+      const char* encoded_key = (memtable_key != nullptr)
+                                    ? memtable_key
+                                    : EncodeKey(&tmp_, internal_key);
+      iter_.SeekForPrev(encoded_key);
     }
 
     // Position at the first entry in collection.
@@ -346,6 +367,14 @@ class HashLinkListRep : public MemTableRep {
                       const char* memtable_key) override {
       node_ = hash_link_list_rep_->FindGreaterOrEqualInBucket(head_,
                                                               internal_key);
+    }
+
+    // Retreat to the last entry with a key <= target
+    virtual void SeekForPrev(const Slice& internal_key,
+                             const char* memtable_key) override {
+      // Since we do not support Prev()
+      // We simply do not support SeekForPrev
+      Reset(nullptr);
     }
 
     // Position at the first entry in collection.
@@ -406,7 +435,7 @@ class HashLinkListRep : public MemTableRep {
         } else {
           IterKey encoded_key;
           encoded_key.EncodeLengthPrefixedKey(k);
-          skip_list_iter_->Seek(encoded_key.GetKey().data());
+          skip_list_iter_->Seek(encoded_key.GetUserKey().data());
         }
       } else {
         // The bucket is organized as a linked list
@@ -458,6 +487,8 @@ class HashLinkListRep : public MemTableRep {
     virtual void Prev() override {}
     virtual void Seek(const Slice& user_key,
                       const char* memtable_key) override {}
+    virtual void SeekForPrev(const Slice& user_key,
+                             const char* memtable_key) override {}
     virtual void SeekToFirst() override {}
     virtual void SeekToLast() override {}
 

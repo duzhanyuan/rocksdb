@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 #pragma once
 
 #include <map>
@@ -21,6 +23,9 @@ struct LessOfComparator {
 
   bool operator()(const std::string& a, const std::string& b) const {
     return cmp->Compare(Slice(a), Slice(b)) < 0;
+  }
+  bool operator()(const Slice& a, const Slice& b) const {
+    return cmp->Compare(a, b) < 0;
   }
 
   const Comparator* cmp;

@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -16,12 +18,19 @@
 #include <vector>
 #include <string>
 
-#include "db/dbformat.h"
 #include "db/column_family.h"
+#include "db/dbformat.h"
+#include "db/flush_scheduler.h"
+#include "db/internal_stats.h"
+#include "db/job_context.h"
 #include "db/log_writer.h"
 #include "db/memtable_list.h"
 #include "db/snapshot_impl.h"
 #include "db/version_edit.h"
+#include "db/write_controller.h"
+#include "db/write_thread.h"
+#include "monitoring/instrumented_mutex.h"
+#include "options/db_options.h"
 #include "port/port.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
@@ -30,14 +39,8 @@
 #include "table/scoped_arena_iterator.h"
 #include "util/autovector.h"
 #include "util/event_logger.h"
-#include "util/instrumented_mutex.h"
 #include "util/stop_watch.h"
 #include "util/thread_local.h"
-#include "db/internal_stats.h"
-#include "db/write_controller.h"
-#include "db/flush_scheduler.h"
-#include "db/write_thread.h"
-#include "db/job_context.h"
 
 namespace rocksdb {
 
@@ -53,7 +56,7 @@ class FlushJob {
   // TODO(icanadi) make effort to reduce number of parameters here
   // IMPORTANT: mutable_cf_options needs to be alive while FlushJob is alive
   FlushJob(const std::string& dbname, ColumnFamilyData* cfd,
-           const DBOptions& db_options,
+           const ImmutableDBOptions& db_options,
            const MutableCFOptions& mutable_cf_options,
            const EnvOptions& env_options, VersionSet* versions,
            InstrumentedMutex* db_mutex, std::atomic<bool>* shutting_down,
@@ -66,18 +69,21 @@ class FlushJob {
 
   ~FlushJob();
 
+  // Require db_mutex held.
+  // Once PickMemTable() is called, either Run() or Cancel() has to be call.
+  void PickMemTable();
   Status Run(FileMetaData* file_meta = nullptr);
+  void Cancel();
   TableProperties GetTableProperties() const { return table_properties_; }
 
  private:
   void ReportStartedFlush();
   void ReportFlushInputSize(const autovector<MemTable*>& mems);
   void RecordFlushIOStats();
-  Status WriteLevel0Table(const autovector<MemTable*>& mems, VersionEdit* edit,
-                          FileMetaData* meta);
+  Status WriteLevel0Table();
   const std::string& dbname_;
   ColumnFamilyData* cfd_;
-  const DBOptions& db_options_;
+  const ImmutableDBOptions& db_options_;
   const MutableCFOptions& mutable_cf_options_;
   const EnvOptions& env_options_;
   VersionSet* versions_;
@@ -94,6 +100,13 @@ class FlushJob {
   EventLogger* event_logger_;
   TableProperties table_properties_;
   bool measure_io_stats_;
+
+  // Variables below are set by PickMemTable():
+  FileMetaData meta_;
+  autovector<MemTable*> mems_;
+  VersionEdit* edit_;
+  Version* base_;
+  bool pick_memtable_called;
 };
 
 }  // namespace rocksdb

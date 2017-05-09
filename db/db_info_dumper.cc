@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
@@ -15,13 +17,13 @@
 #include <algorithm>
 #include <vector>
 
-#include "db/filename.h"
-#include "rocksdb/options.h"
 #include "rocksdb/env.h"
+#include "util/filename.h"
 
 namespace rocksdb {
 
-void DumpDBFileSummary(const DBOptions& options, const std::string& dbname) {
+void DumpDBFileSummary(const ImmutableDBOptions& options,
+                       const std::string& dbname) {
   if (options.info_log == nullptr) {
     return;
   }

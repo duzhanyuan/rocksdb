@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 /*
   Murmurhash from http://sites.google.com/site/murmurhash/
@@ -46,12 +48,12 @@ uint64_t MurmurHash64A ( const void * key, int len, unsigned int seed )
 
     switch(len & 7)
     {
-    case 7: h ^= ((uint64_t)data2[6]) << 48;
-    case 6: h ^= ((uint64_t)data2[5]) << 40;
-    case 5: h ^= ((uint64_t)data2[4]) << 32;
-    case 4: h ^= ((uint64_t)data2[3]) << 24;
-    case 3: h ^= ((uint64_t)data2[2]) << 16;
-    case 2: h ^= ((uint64_t)data2[1]) << 8;
+    case 7: h ^= ((uint64_t)data2[6]) << 48; // fallthrough
+    case 6: h ^= ((uint64_t)data2[5]) << 40; // fallthrough
+    case 5: h ^= ((uint64_t)data2[4]) << 32; // fallthrough
+    case 4: h ^= ((uint64_t)data2[3]) << 24; // fallthrough
+    case 3: h ^= ((uint64_t)data2[2]) << 16; // fallthrough
+    case 2: h ^= ((uint64_t)data2[1]) << 8; // fallthrough
     case 1: h ^= ((uint64_t)data2[0]);
         h *= m;
     };
@@ -167,8 +169,8 @@ unsigned int MurmurHashNeutral2 ( const void * key, int len, unsigned int seed )
 
     switch(len)
     {
-    case 3: h ^= data[2] << 16;
-    case 2: h ^= data[1] << 8;
+    case 3: h ^= data[2] << 16; // fallthrough
+    case 2: h ^= data[1] << 8; // fallthrough
     case 1: h ^= data[0];
         h *= m;
     };

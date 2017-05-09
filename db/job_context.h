@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -12,7 +14,6 @@
 #include <string>
 #include <vector>
 
-#include "db/column_family.h"
 #include "db/log_writer.h"
 
 namespace rocksdb {
@@ -55,6 +56,10 @@ struct JobContext {
 
   // a list of log files that we need to delete
   std::vector<uint64_t> log_delete_files;
+
+  // a list of log files that we need to preserve during full purge since they
+  // will be reused later
+  std::vector<uint64_t> log_recycle_files;
 
   // a list of manifest files that we need to delete
   std::vector<std::string> manifest_delete_files;

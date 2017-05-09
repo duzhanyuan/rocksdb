@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -9,6 +11,7 @@
 
 #pragma once
 #include <memory>
+#include "table/internal_iterator.h"
 
 namespace rocksdb {
 
@@ -39,7 +42,13 @@ class TableReader {
   //               option is effective only for block-based table format.
   virtual InternalIterator* NewIterator(const ReadOptions&,
                                         Arena* arena = nullptr,
+                                        const InternalKeyComparator* = nullptr,
                                         bool skip_filters = false) = 0;
+
+  virtual InternalIterator* NewRangeTombstoneIterator(
+      const ReadOptions& read_options) {
+    return nullptr;
+  }
 
   // Given a key, return an approximate byte offset in the file where
   // the data for that key begins (or would begin if the key were

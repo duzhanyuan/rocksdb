@@ -2,14 +2,16 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "rocksdb/db_bench_tool.h"
+#include "options/options_parser.h"
 #include "rocksdb/utilities/options_util.h"
-#include "util/options_parser.h"
 #include "util/random.h"
 #include "util/testharness.h"
 #include "util/testutil.h"
@@ -200,21 +202,20 @@ const std::string options_file_content = R"OPTIONS_FILE(
   is_fd_close_on_exec=true
   bytes_per_sync=1048576
   enable_thread_tracking=true
-  disable_data_sync=false
   recycle_log_file_num=0
-  disableDataSync=false
   create_missing_column_families=false
   log_file_time_to_roll=0
   max_background_flushes=1
   create_if_missing=true
   error_if_exists=false
-  allow_os_buffer=true
   delayed_write_rate=1048576
   manifest_preallocation_size=4194304
+  allow_mmap_reads=false
   allow_mmap_writes=false
+  use_direct_reads=false
+  use_direct_io_for_flush_and_compaction=false
   stats_dump_period_sec=600
   allow_fallocate=true
-  allow_mmap_reads=false
   max_log_file_size=83886080
   random_access_max_buffer_size=1048576
   advise_random_on_open=true
@@ -229,7 +230,7 @@ const std::string options_file_content = R"OPTIONS_FILE(
   max_bytes_for_level_base=104857600
   bloom_locality=0
   target_file_size_base=10485760
-  memtable_prefix_bloom_huge_page_tlb_size=0
+  memtable_huge_page_size=0
   max_successive_merges=1000
   max_sequential_skip_in_iterations=8
   arena_block_size=52428800

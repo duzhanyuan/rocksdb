@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright 2014 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -12,6 +14,7 @@
 // file data (or entire files) not protected by a "sync".
 
 #include "util/fault_injection_test_env.h"
+#include <functional>
 #include <utility>
 
 namespace rocksdb {
@@ -148,7 +151,7 @@ Status TestWritableFile::Flush() {
 
 Status TestWritableFile::Sync() {
   if (!env_->IsFilesystemActive()) {
-    return Status::OK();
+    return Status::IOError("FaultInjectionTestEnv: not active");
   }
   // No need to actual sync.
   state_.pos_at_last_sync_ = state_.pos_;

@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #pragma once
 
@@ -139,7 +141,6 @@ class DBLoaderCommand : public LDBCommand {
   virtual Options PrepareOptionsForOpenDB() override;
 
  private:
-  bool create_if_missing_;
   bool disable_wal_;
   bool bulk_load_;
   bool compact_;
@@ -374,6 +375,23 @@ class DeleteCommand : public LDBCommand {
   std::string key_;
 };
 
+class DeleteRangeCommand : public LDBCommand {
+ public:
+  static std::string Name() { return "deleterange"; }
+
+  DeleteRangeCommand(const std::vector<std::string>& params,
+                     const std::map<std::string, std::string>& options,
+                     const std::vector<std::string>& flags);
+
+  virtual void DoCommand() override;
+
+  static void Help(std::string& ret);
+
+ private:
+  std::string begin_key_;
+  std::string end_key_;
+};
+
 class PutCommand : public LDBCommand {
  public:
   static std::string Name() { return "put"; }
@@ -431,6 +449,23 @@ class CheckConsistencyCommand : public LDBCommand {
   static void Help(std::string& ret);
 };
 
+class CheckPointCommand : public LDBCommand {
+ public:
+  static std::string Name() { return "checkpoint"; }
+
+  CheckPointCommand(const std::vector<std::string>& params,
+                const std::map<std::string, std::string>& options,
+                const std::vector<std::string>& flags);
+
+  virtual void DoCommand() override;
+
+  static void Help(std::string& ret);
+
+  std::string checkpoint_dir_;
+ private:
+  static const std::string ARG_CHECKPOINT_DIR;
+};
+
 class RepairCommand : public LDBCommand {
  public:
   static std::string Name() { return "repair"; }
@@ -443,6 +478,47 @@ class RepairCommand : public LDBCommand {
 
   virtual bool NoDBOpen() override { return true; }
 
+  static void Help(std::string& ret);
+};
+
+class BackupableCommand : public LDBCommand {
+ public:
+  BackupableCommand(const std::vector<std::string>& params,
+                    const std::map<std::string, std::string>& options,
+                    const std::vector<std::string>& flags);
+
+ protected:
+  static void Help(const std::string& name, std::string& ret);
+  std::string backup_env_uri_;
+  std::string backup_dir_;
+  int num_threads_;
+  std::unique_ptr<Logger> logger_;
+
+ private:
+  static const std::string ARG_BACKUP_DIR;
+  static const std::string ARG_BACKUP_ENV_URI;
+  static const std::string ARG_NUM_THREADS;
+  static const std::string ARG_STDERR_LOG_LEVEL;
+};
+
+class BackupCommand : public BackupableCommand {
+ public:
+  static std::string Name() { return "backup"; }
+  BackupCommand(const std::vector<std::string>& params,
+                const std::map<std::string, std::string>& options,
+                const std::vector<std::string>& flags);
+  virtual void DoCommand() override;
+  static void Help(std::string& ret);
+};
+
+class RestoreCommand : public BackupableCommand {
+ public:
+  static std::string Name() { return "restore"; }
+  RestoreCommand(const std::vector<std::string>& params,
+                 const std::map<std::string, std::string>& options,
+                 const std::vector<std::string>& flags);
+  virtual void DoCommand() override;
+  virtual bool NoDBOpen() override { return true; }
   static void Help(std::string& ret);
 };
 

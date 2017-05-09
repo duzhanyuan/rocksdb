@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #ifndef ROCKSDB_LITE
 #ifndef __STDC_FORMAT_MACROS
@@ -13,10 +15,10 @@
 #include <cctype>
 #include <unordered_map>
 
+#include "options/options_parser.h"
 #include "rocksdb/db.h"
 #include "rocksdb/table.h"
 #include "rocksdb/utilities/options_util.h"
-#include "util/options_parser.h"
 #include "util/random.h"
 #include "util/testharness.h"
 #include "util/testutil.h"
@@ -105,7 +107,8 @@ class DummyTableFactory : public TableFactory {
   virtual Status NewTableReader(const TableReaderOptions& table_reader_options,
                                 unique_ptr<RandomAccessFileReader>&& file,
                                 uint64_t file_size,
-                                unique_ptr<TableReader>* table_reader) const {
+                                unique_ptr<TableReader>* table_reader,
+                                bool prefetch_index_and_filter_in_cache) const {
     return Status::NotSupported();
   }
 
@@ -128,19 +131,19 @@ class DummyMergeOperator : public MergeOperator {
   DummyMergeOperator() {}
   virtual ~DummyMergeOperator() {}
 
-  virtual bool FullMerge(const Slice& key, const Slice* existing_value,
-                         const std::deque<std::string>& operand_list,
-                         std::string* new_value, Logger* logger) const {
+  virtual bool FullMergeV2(const MergeOperationInput& merge_in,
+                           MergeOperationOutput* merge_out) const override {
     return false;
   }
 
   virtual bool PartialMergeMulti(const Slice& key,
                                  const std::deque<Slice>& operand_list,
-                                 std::string* new_value, Logger* logger) const {
+                                 std::string* new_value,
+                                 Logger* logger) const override {
     return false;
   }
 
-  virtual const char* Name() const { return "DummyMergeOperator"; }
+  virtual const char* Name() const override { return "DummyMergeOperator"; }
 };
 
 class DummySliceTransform : public SliceTransform {

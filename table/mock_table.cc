@@ -4,6 +4,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #include "table/mock_table.h"
 
@@ -28,7 +30,9 @@ stl_wrappers::KVMap MakeMockFile(
   return stl_wrappers::KVMap(l, stl_wrappers::LessOfComparator(&icmp_));
 }
 
-InternalIterator* MockTableReader::NewIterator(const ReadOptions&, Arena* arena,
+InternalIterator* MockTableReader::NewIterator(const ReadOptions&,
+                                               Arena* arena,
+                                               const InternalKeyComparator*,
                                                bool skip_filters) {
   return new MockTableIterator(table_);
 }
@@ -59,7 +63,8 @@ MockTableFactory::MockTableFactory() : next_id_(1) {}
 Status MockTableFactory::NewTableReader(
     const TableReaderOptions& table_reader_options,
     unique_ptr<RandomAccessFileReader>&& file, uint64_t file_size,
-    unique_ptr<TableReader>* table_reader) const {
+    unique_ptr<TableReader>* table_reader,
+    bool prefetch_index_and_filter_in_cache) const {
   uint32_t id = GetIDFromFile(file.get());
 
   MutexLock lock_guard(&file_system_.mutex);
@@ -116,7 +121,7 @@ uint32_t MockTableFactory::GetIDFromFile(RandomAccessFileReader* file) const {
 void MockTableFactory::AssertSingleFile(
     const stl_wrappers::KVMap& file_contents) {
   ASSERT_EQ(file_system_.files.size(), 1U);
-  ASSERT_TRUE(file_contents == file_system_.files.begin()->second);
+  ASSERT_EQ(file_contents, file_system_.files.begin()->second);
 }
 
 void MockTableFactory::AssertLatestFile(

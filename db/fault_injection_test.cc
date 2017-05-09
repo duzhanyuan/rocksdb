@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright 2014 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -12,17 +14,17 @@
 // file data (or entire files) not protected by a "sync".
 
 #include "db/db_impl.h"
-#include "db/filename.h"
 #include "db/log_format.h"
 #include "db/version_set.h"
+#include "env/mock_env.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
 #include "rocksdb/table.h"
 #include "rocksdb/write_batch.h"
 #include "util/fault_injection_test_env.h"
+#include "util/filename.h"
 #include "util/logging.h"
-#include "util/mock_env.h"
 #include "util/mutexlock.h"
 #include "util/sync_point.h"
 #include "util/testharness.h"
@@ -228,6 +230,11 @@ class FaultInjectionTest : public testing::Test,
     return Status::OK();
   }
 
+#if __clang_major__ > 3 || (__clang_major__ == 3 && __clang_minor__ >= 9)
+__attribute__((__no_sanitize__("undefined")))
+#elif __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 9)
+__attribute__((__no_sanitize_undefined__))
+#endif
   // Return the ith key
   Slice Key(int i, std::string* storage) const {
     int num = i;
@@ -405,6 +412,7 @@ TEST_P(FaultInjectionTest, WriteOptionSyncTest) {
   env_->SetFilesystemActive(false);
   NoWriteTestReopenWithFault(kResetDropAndDeleteUnsynced);
   sleeping_task_low.WakeUp();
+  sleeping_task_low.WaitUntilDone();
 
   ASSERT_OK(OpenDB());
   std::string val;
@@ -489,6 +497,7 @@ TEST_P(FaultInjectionTest, ManualLogSyncTest) {
   env_->SetFilesystemActive(false);
   NoWriteTestReopenWithFault(kResetDropAndDeleteUnsynced);
   sleeping_task_low.WakeUp();
+  sleeping_task_low.WaitUntilDone();
 
   ASSERT_OK(OpenDB());
   std::string val;
@@ -499,6 +508,30 @@ TEST_P(FaultInjectionTest, ManualLogSyncTest) {
   Value(1, &value_space);
   ASSERT_OK(ReadValue(1, &val));
   ASSERT_EQ(value_space, val);
+}
+
+TEST_P(FaultInjectionTest, WriteBatchWalTerminationTest) {
+  ReadOptions ro;
+  Options options = CurrentOptions();
+  options.env = env_;
+
+  WriteOptions wo;
+  wo.sync = true;
+  wo.disableWAL = false;
+  WriteBatch batch;
+  batch.Put("cats", "dogs");
+  batch.MarkWalTerminationPoint();
+  batch.Put("boys", "girls");
+  ASSERT_OK(db_->Write(wo, &batch));
+
+  env_->SetFilesystemActive(false);
+  NoWriteTestReopenWithFault(kResetDropAndDeleteUnsynced);
+  ASSERT_OK(OpenDB());
+
+  std::string val;
+  ASSERT_OK(db_->Get(ro, "cats", &val));
+  ASSERT_EQ("dogs", val);
+  ASSERT_EQ(db_->Get(ro, "boys", &val), Status::NotFound());
 }
 
 INSTANTIATE_TEST_CASE_P(FaultTest, FaultInjectionTest, ::testing::Bool());

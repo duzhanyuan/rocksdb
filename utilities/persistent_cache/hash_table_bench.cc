@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 
 #if !defined(OS_WIN) && !defined(ROCKSDB_LITE)
@@ -11,7 +13,6 @@
 int main() { fprintf(stderr, "Please install gflags to run tools\n"); }
 #else
 #include <gflags/gflags.h>
-#endif
 
 #include <atomic>
 #include <functional>
@@ -273,9 +274,9 @@ class GranularLockImpl : public HashTableImpl<size_t, string> {
 // main
 //
 int main(int argc, char** argv) {
-  google::SetUsageMessage(std::string("\nUSAGE:\n") + std::string(argv[0]) +
+  GFLAGS::SetUsageMessage(std::string("\nUSAGE:\n") + std::string(argv[0]) +
                           " [OPTIONS]...");
-  google::ParseCommandLineFlags(&argc, &argv, false);
+  GFLAGS::ParseCommandLineFlags(&argc, &argv, false);
 
   //
   // Micro benchmark unordered_map
@@ -298,6 +299,7 @@ int main(int argc, char** argv) {
 
   return 0;
 }
+#endif  // #ifndef GFLAGS
 #else
 int main(int /*argc*/, char** /*argv*/) { return 0; }
 #endif

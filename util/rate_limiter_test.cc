@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -21,6 +23,7 @@
 
 namespace rocksdb {
 
+// TODO(yhchiang): the rate will not be accurate when we run test in parallel.
 class RateLimiterTest : public testing::Test {};
 
 TEST_F(RateLimiterTest, OverflowRate) {
@@ -29,14 +32,14 @@ TEST_F(RateLimiterTest, OverflowRate) {
 }
 
 TEST_F(RateLimiterTest, StartStop) {
-  std::unique_ptr<RateLimiter> limiter(new GenericRateLimiter(100, 100, 10));
+  std::unique_ptr<RateLimiter> limiter(NewGenericRateLimiter(100, 100, 10));
 }
 
 TEST_F(RateLimiterTest, Rate) {
   auto* env = Env::Default();
   struct Arg {
     Arg(int32_t _target_rate, int _burst)
-        : limiter(new GenericRateLimiter(_target_rate, 100 * 1000, 10)),
+        : limiter(NewGenericRateLimiter(_target_rate, 100 * 1000, 10)),
           request_size(_target_rate / 10),
           burst(_burst) {}
     std::unique_ptr<RateLimiter> limiter;
@@ -54,9 +57,10 @@ TEST_F(RateLimiterTest, Rate) {
     while (thread_env->NowMicros() < until) {
       for (int i = 0; i < static_cast<int>(r.Skewed(arg->burst) + 1); ++i) {
         arg->limiter->Request(r.Uniform(arg->request_size - 1) + 1,
-                              Env::IO_HIGH);
+                              Env::IO_HIGH, nullptr /* stats */);
       }
-      arg->limiter->Request(r.Uniform(arg->request_size - 1) + 1, Env::IO_LOW);
+      arg->limiter->Request(r.Uniform(arg->request_size - 1) + 1, Env::IO_LOW,
+                            nullptr /* stats */);
     }
   };
 
@@ -87,8 +91,8 @@ TEST_F(RateLimiterTest, Rate) {
               arg.request_size - 1, target / 1024, rate / 1024,
               elapsed / 1000000.0);
 
-      ASSERT_GE(rate / target, 0.9);
-      ASSERT_LE(rate / target, 1.1);
+      ASSERT_GE(rate / target, 0.80);
+      ASSERT_LE(rate / target, 1.25);
     }
   }
 }
@@ -109,7 +113,7 @@ TEST_F(RateLimiterTest, LimitChangeTest) {
 
   auto writer = [](void* p) {
     auto* arg = static_cast<Arg*>(p);
-    arg->limiter->Request(arg->request_size, arg->pri);
+    arg->limiter->Request(arg->request_size, arg->pri, nullptr /* stats */);
   };
 
   for (uint32_t i = 1; i <= 16; i <<= 1) {

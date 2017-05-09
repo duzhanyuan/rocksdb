@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #ifndef ROCKSDB_LITE
 
@@ -81,7 +83,7 @@ Status TransactionUtil::CheckKey(DBImpl* db_impl, SuperVersion* sv,
     if (cache_only) {
       // The age of this memtable is too new to use to check for recent
       // writes.
-      char msg[255];
+      char msg[300];
       snprintf(msg, sizeof(msg),
                "Transaction could not check for conflicts for operation at "
                "SequenceNumber %" PRIu64

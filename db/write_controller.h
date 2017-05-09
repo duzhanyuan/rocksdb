@@ -2,11 +2,14 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #pragma once
 
 #include <stdint.h>
 
+#include <atomic>
 #include <memory>
 
 namespace rocksdb {
@@ -26,7 +29,7 @@ class WriteController {
         total_compaction_pressure_(0),
         bytes_left_(0),
         last_refill_time_(0) {
-    set_delayed_write_rate(_delayed_write_rate);
+    set_max_delayed_write_rate(_delayed_write_rate);
   }
   ~WriteController() = default;
 
@@ -45,7 +48,7 @@ class WriteController {
 
   // these three metods are querying the state of the WriteController
   bool IsStopped() const;
-  bool NeedsDelay() const { return total_delayed_ > 0; }
+  bool NeedsDelay() const { return total_delayed_.load() > 0; }
   bool NeedSpeedupCompaction() const {
     return IsStopped() || NeedsDelay() || total_compaction_pressure_ > 0;
   }
@@ -57,22 +60,42 @@ class WriteController {
     // avoid divide 0
     if (write_rate == 0) {
       write_rate = 1u;
+    } else if (write_rate > max_delayed_write_rate()) {
+      write_rate = max_delayed_write_rate();
     }
     delayed_write_rate_ = write_rate;
   }
+
+  void set_max_delayed_write_rate(uint64_t write_rate) {
+    // avoid divide 0
+    if (write_rate == 0) {
+      write_rate = 1u;
+    }
+    max_delayed_write_rate_ = write_rate;
+    // update delayed_write_rate_ as well
+    delayed_write_rate_ = write_rate;
+  }
+
   uint64_t delayed_write_rate() const { return delayed_write_rate_; }
 
+  uint64_t max_delayed_write_rate() const { return max_delayed_write_rate_; }
+
  private:
+  uint64_t NowMicrosMonotonic(Env* env);
+
   friend class WriteControllerToken;
   friend class StopWriteToken;
   friend class DelayWriteToken;
   friend class CompactionPressureToken;
 
   int total_stopped_;
-  int total_delayed_;
+  std::atomic<int> total_delayed_;
   int total_compaction_pressure_;
   uint64_t bytes_left_;
   uint64_t last_refill_time_;
+  // write rate set when initialization or by `DBImpl::SetDBOptions`
+  uint64_t max_delayed_write_rate_;
+  // current write rate
   uint64_t delayed_write_rate_;
 };
 

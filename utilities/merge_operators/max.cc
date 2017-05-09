@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #include <memory>
 
@@ -19,22 +21,20 @@ namespace {  // anonymous namespace
 // Slice::compare
 class MaxOperator : public MergeOperator {
  public:
-  virtual bool FullMerge(const Slice& key, const Slice* existing_value,
-                         const std::deque<std::string>& operand_list,
-                         std::string* new_value,
-                         Logger* logger) const override {
-    Slice max;
-    if (existing_value) {
-      max = Slice(existing_value->data(), existing_value->size());
+  virtual bool FullMergeV2(const MergeOperationInput& merge_in,
+                           MergeOperationOutput* merge_out) const override {
+    Slice& max = merge_out->existing_operand;
+    if (merge_in.existing_value) {
+      max = Slice(merge_in.existing_value->data(),
+                  merge_in.existing_value->size());
     }
 
-    for (const auto& op : operand_list) {
+    for (const auto& op : merge_in.operand_list) {
       if (max.compare(op) < 0) {
-        max = Slice(op.data(), op.size());
+        max = op;
       }
     }
 
-    new_value->assign(max.data(), max.size());
     return true;
   }
 

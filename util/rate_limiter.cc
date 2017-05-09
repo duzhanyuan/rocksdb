@@ -2,12 +2,15 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "util/rate_limiter.h"
+#include "monitoring/statistics.h"
 #include "port/port.h"
 #include "rocksdb/env.h"
 #include "util/sync_point.h"
@@ -36,7 +39,7 @@ GenericRateLimiter::GenericRateLimiter(int64_t rate_bytes_per_sec,
       exit_cv_(&request_mutex_),
       requests_to_wait_(0),
       available_bytes_(0),
-      next_refill_us_(env_->NowMicros()),
+      next_refill_us_(NowMicrosMonotonic(env_)),
       fairness_(fairness > 100 ? 100 : fairness),
       rnd_((uint32_t)time(nullptr)),
       leader_(nullptr) {
@@ -70,7 +73,8 @@ void GenericRateLimiter::SetBytesPerSecond(int64_t bytes_per_second) {
       std::memory_order_relaxed);
 }
 
-void GenericRateLimiter::Request(int64_t bytes, const Env::IOPriority pri) {
+void GenericRateLimiter::Request(int64_t bytes, const Env::IOPriority pri,
+                                 Statistics* stats) {
   assert(bytes <= refill_bytes_per_period_.load(std::memory_order_relaxed));
   TEST_SYNC_POINT("GenericRateLimiter::Request");
   MutexLock g(&request_mutex_);
@@ -107,7 +111,15 @@ void GenericRateLimiter::Request(int64_t bytes, const Env::IOPriority pri) {
          (!queue_[Env::IO_LOW].empty() &&
             &r == queue_[Env::IO_LOW].front()))) {
       leader_ = &r;
-      timedout = r.cv.TimedWait(next_refill_us_);
+      int64_t delta = next_refill_us_ - NowMicrosMonotonic(env_);
+      delta = delta > 0 ? delta : 0;
+      if (delta == 0) {
+        timedout = true;
+      } else {
+        int64_t wait_until = env_->NowMicros() + delta;
+        RecordTick(stats, NUMBER_RATE_LIMITER_DRAINS);
+        timedout = r.cv.TimedWait(wait_until);
+      }
     } else {
       // Not at the front of queue or an leader has already been elected
       r.cv.Wait();
@@ -178,7 +190,7 @@ void GenericRateLimiter::Request(int64_t bytes, const Env::IOPriority pri) {
 
 void GenericRateLimiter::Refill() {
   TEST_SYNC_POINT("GenericRateLimiter::Refill");
-  next_refill_us_ = env_->NowMicros() + refill_period_us_;
+  next_refill_us_ = NowMicrosMonotonic(env_) + refill_period_us_;
   // Carry over the left over quota from the last period
   auto refill_bytes_per_period =
       refill_bytes_per_period_.load(std::memory_order_relaxed);

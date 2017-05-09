@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -17,6 +19,9 @@
 #include "db/merge_context.h"
 #include "db/merge_helper.h"
 #include "db/pinned_iterators_manager.h"
+#include "monitoring/perf_context_imp.h"
+#include "monitoring/statistics.h"
+#include "port/port.h"
 #include "rocksdb/comparator.h"
 #include "rocksdb/env.h"
 #include "rocksdb/iterator.h"
@@ -24,13 +29,14 @@
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/write_buffer_manager.h"
 #include "table/internal_iterator.h"
-#include "table/merger.h"
+#include "table/iterator_wrapper.h"
+#include "table/merging_iterator.h"
 #include "util/arena.h"
+#include "util/autovector.h"
 #include "util/coding.h"
+#include "util/memory_usage.h"
 #include "util/murmurhash.h"
 #include "util/mutexlock.h"
-#include "util/perf_context_imp.h"
-#include "util/statistics.h"
 #include "util/stop_watch.h"
 
 namespace rocksdb {
@@ -44,8 +50,7 @@ MemTableOptions::MemTableOptions(const ImmutableCFOptions& ioptions,
               static_cast<double>(mutable_cf_options.write_buffer_size) *
               mutable_cf_options.memtable_prefix_bloom_size_ratio) *
           8u),
-      memtable_prefix_bloom_huge_page_tlb_size(
-          mutable_cf_options.memtable_prefix_bloom_huge_page_tlb_size),
+      memtable_huge_page_size(mutable_cf_options.memtable_huge_page_size),
       inplace_update_support(ioptions.inplace_update_support),
       inplace_update_num_locks(mutable_cf_options.inplace_update_num_locks),
       inplace_callback(ioptions.inplace_callback),
@@ -58,16 +63,21 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
                    const ImmutableCFOptions& ioptions,
                    const MutableCFOptions& mutable_cf_options,
                    WriteBufferManager* write_buffer_manager,
-                   SequenceNumber earliest_seq)
+                   SequenceNumber latest_seq)
     : comparator_(cmp),
       moptions_(ioptions, mutable_cf_options),
       refs_(0),
       kArenaBlockSize(OptimizeBlockSize(moptions_.arena_block_size)),
-      arena_(moptions_.arena_block_size, 0),
+      arena_(moptions_.arena_block_size,
+             mutable_cf_options.memtable_huge_page_size),
       allocator_(&arena_, write_buffer_manager),
       table_(ioptions.memtable_factory->CreateMemTableRep(
           comparator_, &allocator_, ioptions.prefix_extractor,
           ioptions.info_log)),
+      range_del_table_(SkipListFactory().CreateMemTableRep(
+          comparator_, &allocator_, nullptr /* transform */,
+          ioptions.info_log)),
+      is_range_del_table_empty_(true),
       data_size_(0),
       num_entries_(0),
       num_deletes_(0),
@@ -75,7 +85,8 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
       flush_completed_(false),
       file_number_(0),
       first_seqno_(0),
-      earliest_seqno_(earliest_seq),
+      earliest_seqno_(latest_seq),
+      creation_seq_(latest_seq),
       mem_next_logfile_number_(0),
       min_prep_log_referenced_(0),
       locks_(moptions_.inplace_update_support
@@ -83,7 +94,9 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
                  : 0),
       prefix_extractor_(ioptions.prefix_extractor),
       flush_state_(FLUSH_NOT_REQUESTED),
-      env_(ioptions.env) {
+      env_(ioptions.env),
+      insert_with_hint_prefix_extractor_(
+          ioptions.memtable_insert_with_hint_prefix_extractor) {
   UpdateFlushState();
   // something went wrong if we need to flush before inserting anything
   assert(!ShouldScheduleFlush());
@@ -92,23 +105,28 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
     prefix_bloom_.reset(new DynamicBloom(
         &allocator_, moptions_.memtable_prefix_bloom_bits,
         ioptions.bloom_locality, 6 /* hard coded 6 probes */, nullptr,
-        moptions_.memtable_prefix_bloom_huge_page_tlb_size, ioptions.info_log));
+        moptions_.memtable_huge_page_size, ioptions.info_log));
   }
 }
 
 MemTable::~MemTable() { assert(refs_ == 0); }
 
 size_t MemTable::ApproximateMemoryUsage() {
-  size_t arena_usage = arena_.ApproximateMemoryUsage();
-  size_t table_usage = table_->ApproximateMemoryUsage();
-  // let MAX_USAGE =  std::numeric_limits<size_t>::max()
-  // then if arena_usage + total_usage >= MAX_USAGE, return MAX_USAGE.
-  // the following variation is to avoid numeric overflow.
-  if (arena_usage >= std::numeric_limits<size_t>::max() - table_usage) {
-    return std::numeric_limits<size_t>::max();
+  autovector<size_t> usages = {arena_.ApproximateMemoryUsage(),
+                               table_->ApproximateMemoryUsage(),
+                               range_del_table_->ApproximateMemoryUsage(),
+                               rocksdb::ApproximateMemoryUsage(insert_hints_)};
+  size_t total_usage = 0;
+  for (size_t usage : usages) {
+    // If usage + total_usage >= kMaxSizet, return kMaxSizet.
+    // the following variation is to avoid numeric overflow.
+    if (usage >= port::kMaxSizet - total_usage) {
+      return port::kMaxSizet;
+    }
+    total_usage += usage;
   }
   // otherwise, return the actual usage
-  return arena_usage + table_usage;
+  return total_usage;
 }
 
 bool MemTable::ShouldFlushNow() const {
@@ -122,8 +140,9 @@ bool MemTable::ShouldFlushNow() const {
 
   // If arena still have room for new block allocation, we can safely say it
   // shouldn't flush.
-  auto allocated_memory =
-      table_->ApproximateMemoryUsage() + arena_.MemoryAllocatedBytes();
+  auto allocated_memory = table_->ApproximateMemoryUsage() +
+                          range_del_table_->ApproximateMemoryUsage() +
+                          arena_.MemoryAllocatedBytes();
 
   // if we can still allocate one more block without exceeding the
   // over-allocation ratio, then we should not flush.
@@ -218,13 +237,17 @@ const char* EncodeKey(std::string* scratch, const Slice& target) {
 
 class MemTableIterator : public InternalIterator {
  public:
-  MemTableIterator(
-      const MemTable& mem, const ReadOptions& read_options, Arena* arena)
+  MemTableIterator(const MemTable& mem, const ReadOptions& read_options,
+                   Arena* arena, bool use_range_del_table = false)
       : bloom_(nullptr),
         prefix_extractor_(mem.prefix_extractor_),
+        comparator_(mem.comparator_),
         valid_(false),
-        arena_mode_(arena != nullptr) {
-    if (prefix_extractor_ != nullptr && !read_options.total_order_seek) {
+        arena_mode_(arena != nullptr),
+        value_pinned_(!mem.GetMemTableOptions()->inplace_update_support) {
+    if (use_range_del_table) {
+      iter_ = mem.range_del_table_->GetIterator(arena);
+    } else if (prefix_extractor_ != nullptr && !read_options.total_order_seek) {
       bloom_ = mem.prefix_bloom_.get();
       iter_ = mem.table_->GetDynamicPrefixIterator(arena);
     } else {
@@ -271,6 +294,28 @@ class MemTableIterator : public InternalIterator {
     iter_->Seek(k, nullptr);
     valid_ = iter_->Valid();
   }
+  virtual void SeekForPrev(const Slice& k) override {
+    PERF_TIMER_GUARD(seek_on_memtable_time);
+    PERF_COUNTER_ADD(seek_on_memtable_count, 1);
+    if (bloom_ != nullptr) {
+      if (!bloom_->MayContain(
+              prefix_extractor_->Transform(ExtractUserKey(k)))) {
+        PERF_COUNTER_ADD(bloom_memtable_miss_count, 1);
+        valid_ = false;
+        return;
+      } else {
+        PERF_COUNTER_ADD(bloom_memtable_hit_count, 1);
+      }
+    }
+    iter_->Seek(k, nullptr);
+    valid_ = iter_->Valid();
+    if (!Valid()) {
+      SeekToLast();
+    }
+    while (Valid() && comparator_.comparator.Compare(k, key()) < 0) {
+      Prev();
+    }
+  }
   virtual void SeekToFirst() override {
     iter_->SeekToFirst();
     valid_ = iter_->Valid();
@@ -280,11 +325,13 @@ class MemTableIterator : public InternalIterator {
     valid_ = iter_->Valid();
   }
   virtual void Next() override {
+    PERF_COUNTER_ADD(next_on_memtable_count, 1);
     assert(Valid());
     iter_->Next();
     valid_ = iter_->Valid();
   }
   virtual void Prev() override {
+    PERF_COUNTER_ADD(prev_on_memtable_count, 1);
     assert(Valid());
     iter_->Prev();
     valid_ = iter_->Valid();
@@ -306,12 +353,19 @@ class MemTableIterator : public InternalIterator {
     return true;
   }
 
+  virtual bool IsValuePinned() const override {
+    // memtable value is always pinned, except if we allow inplace update.
+    return value_pinned_;
+  }
+
  private:
   DynamicBloom* bloom_;
   const SliceTransform* const prefix_extractor_;
+  const MemTable::KeyComparator comparator_;
   MemTableRep::Iterator* iter_;
   bool valid_;
   bool arena_mode_;
+  bool value_pinned_;
 
   // No copying allowed
   MemTableIterator(const MemTableIterator&);
@@ -325,29 +379,39 @@ InternalIterator* MemTable::NewIterator(const ReadOptions& read_options,
   return new (mem) MemTableIterator(*this, read_options, arena);
 }
 
+InternalIterator* MemTable::NewRangeTombstoneIterator(
+    const ReadOptions& read_options) {
+  if (read_options.ignore_range_deletions || is_range_del_table_empty_) {
+    return nullptr;
+  }
+  return new MemTableIterator(*this, read_options, nullptr /* arena */,
+                              true /* use_range_del_table */);
+}
+
 port::RWMutex* MemTable::GetLock(const Slice& key) {
   static murmur_hash hash;
   return &locks_[hash(key) % locks_.size()];
 }
 
-uint64_t MemTable::ApproximateSize(const Slice& start_ikey,
-                                   const Slice& end_ikey) {
+MemTable::MemTableStats MemTable::ApproximateStats(const Slice& start_ikey,
+                                                   const Slice& end_ikey) {
   uint64_t entry_count = table_->ApproximateNumEntries(start_ikey, end_ikey);
+  entry_count += range_del_table_->ApproximateNumEntries(start_ikey, end_ikey);
   if (entry_count == 0) {
-    return 0;
+    return {0, 0};
   }
   uint64_t n = num_entries_.load(std::memory_order_relaxed);
   if (n == 0) {
-    return 0;
+    return {0, 0};
   }
   if (entry_count > n) {
-    // table_->ApproximateNumEntries() is just an estimate so it can be larger
-    // than actual entries we have. Cap it to entries we have to limit the
-    // inaccuracy.
+    // (range_del_)table_->ApproximateNumEntries() is just an estimate so it can
+    // be larger than actual entries we have. Cap it to entries we have to limit
+    // the inaccuracy.
     entry_count = n;
   }
   uint64_t data_size = data_size_.load(std::memory_order_relaxed);
-  return entry_count * (data_size / n);
+  return {entry_count * (data_size / n), entry_count};
 }
 
 void MemTable::Add(SequenceNumber s, ValueType type,
@@ -366,10 +430,13 @@ void MemTable::Add(SequenceNumber s, ValueType type,
                                internal_key_size + VarintLength(val_size) +
                                val_size;
   char* buf = nullptr;
-  KeyHandle handle = table_->Allocate(encoded_len, &buf);
+  std::unique_ptr<MemTableRep>& table =
+      type == kTypeRangeDeletion ? range_del_table_ : table_;
+  KeyHandle handle = table->Allocate(encoded_len, &buf);
 
   char* p = EncodeVarint32(buf, internal_key_size);
   memcpy(p, key.data(), key_size);
+  Slice key_slice(p, key_size);
   p += key_size;
   uint64_t packed = PackSequenceAndType(s, type);
   EncodeFixed64(p, packed);
@@ -378,7 +445,14 @@ void MemTable::Add(SequenceNumber s, ValueType type,
   memcpy(p, value.data(), val_size);
   assert((unsigned)(p + val_size - buf) == (unsigned)encoded_len);
   if (!allow_concurrent) {
-    table_->Insert(handle);
+    // Extract prefix for insert with hint.
+    if (insert_with_hint_prefix_extractor_ != nullptr &&
+        insert_with_hint_prefix_extractor_->InDomain(key_slice)) {
+      Slice prefix = insert_with_hint_prefix_extractor_->Transform(key_slice);
+      table->InsertWithHint(handle, &insert_hints_[prefix]);
+    } else {
+      table->Insert(handle);
+    }
 
     // this is a bit ugly, but is the way to avoid locked instructions
     // when incrementing an atomic
@@ -410,7 +484,7 @@ void MemTable::Add(SequenceNumber s, ValueType type,
     assert(post_process_info == nullptr);
     UpdateFlushState();
   } else {
-    table_->InsertConcurrently(handle);
+    table->InsertConcurrently(handle);
 
     assert(post_process_info != nullptr);
     post_process_info->num_entries++;
@@ -436,6 +510,9 @@ void MemTable::Add(SequenceNumber s, ValueType type,
         !first_seqno_.compare_exchange_weak(cur_earliest_seqno, s)) {
     }
   }
+  if (is_range_del_table_empty_ && type == kTypeRangeDeletion) {
+    is_range_del_table_empty_ = false;
+  }
 }
 
 // Callback from MemTable::Get()
@@ -451,6 +528,7 @@ struct Saver {
   const MergeOperator* merge_operator;
   // the merge operations encountered;
   MergeContext* merge_context;
+  RangeDelAggregator* range_del_agg;
   MemTable* mem;
   Logger* logger;
   Statistics* statistics;
@@ -462,9 +540,10 @@ struct Saver {
 static bool SaveValue(void* arg, const char* entry) {
   Saver* s = reinterpret_cast<Saver*>(arg);
   MergeContext* merge_context = s->merge_context;
+  RangeDelAggregator* range_del_agg = s->range_del_agg;
   const MergeOperator* merge_operator = s->merge_operator;
 
-  assert(s != nullptr && merge_context != nullptr);
+  assert(s != nullptr && merge_context != nullptr && range_del_agg != nullptr);
 
   // entry format is:
   //    klength  varint32
@@ -484,6 +563,10 @@ static bool SaveValue(void* arg, const char* entry) {
     ValueType type;
     UnPackSequenceAndType(tag, &s->seq, &type);
 
+    if ((type == kTypeValue || type == kTypeMerge) &&
+        range_del_agg->ShouldDelete(Slice(key_ptr, key_length))) {
+      type = kTypeRangeDeletion;
+    }
     switch (type) {
       case kTypeValue: {
         if (s->inplace_update_support) {
@@ -506,9 +589,9 @@ static bool SaveValue(void* arg, const char* entry) {
         return false;
       }
       case kTypeDeletion:
-      case kTypeSingleDeletion: {
+      case kTypeSingleDeletion:
+      case kTypeRangeDeletion: {
         if (*(s->merge_in_progress)) {
-          *(s->status) = Status::OK();
           *(s->status) = MergeHelper::TimedFullMerge(
               merge_operator, s->key->user_key(), nullptr,
               merge_context->GetOperands(), s->value, s->logger, s->statistics,
@@ -532,7 +615,8 @@ static bool SaveValue(void* arg, const char* entry) {
         }
         Slice v = GetLengthPrefixedSlice(key_ptr + key_length);
         *(s->merge_in_progress) = true;
-        merge_context->PushOperand(v);
+        merge_context->PushOperand(
+            v, s->inplace_update_support == false /* operand_pinned */);
         return true;
       }
       default:
@@ -546,7 +630,9 @@ static bool SaveValue(void* arg, const char* entry) {
 }
 
 bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
-                   MergeContext* merge_context, SequenceNumber* seq) {
+                   MergeContext* merge_context,
+                   RangeDelAggregator* range_del_agg, SequenceNumber* seq,
+                   const ReadOptions& read_opts) {
   // The sequence number is updated synchronously in version_set.h
   if (IsEmpty()) {
     // Avoiding recording stats for speed.
@@ -569,6 +655,13 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
     if (prefix_bloom_) {
       PERF_COUNTER_ADD(bloom_memtable_hit_count, 1);
     }
+    std::unique_ptr<InternalIterator> range_del_iter(
+        NewRangeTombstoneIterator(read_opts));
+    Status status = range_del_agg->AddTombstones(std::move(range_del_iter));
+    if (!status.ok()) {
+      *s = status;
+      return false;
+    }
     Saver saver;
     saver.status = s;
     saver.found_final_value = &found_final_value;
@@ -578,6 +671,7 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
     saver.seq = kMaxSequenceNumber;
     saver.mem = this;
     saver.merge_context = merge_context;
+    saver.range_del_agg = range_del_agg;
     saver.merge_operator = moptions_.merge_operator;
     saver.logger = moptions_.info_log;
     saver.inplace_update_support = moptions_.inplace_update_support;
@@ -626,29 +720,22 @@ void MemTable::Update(SequenceNumber seq,
       ValueType type;
       SequenceNumber unused;
       UnPackSequenceAndType(tag, &unused, &type);
-      switch (type) {
-        case kTypeValue: {
-          Slice prev_value = GetLengthPrefixedSlice(key_ptr + key_length);
-          uint32_t prev_size = static_cast<uint32_t>(prev_value.size());
-          uint32_t new_size = static_cast<uint32_t>(value.size());
+      if (type == kTypeValue) {
+        Slice prev_value = GetLengthPrefixedSlice(key_ptr + key_length);
+        uint32_t prev_size = static_cast<uint32_t>(prev_value.size());
+        uint32_t new_size = static_cast<uint32_t>(value.size());
 
-          // Update value, if new value size  <= previous value size
-          if (new_size <= prev_size ) {
-            char* p = EncodeVarint32(const_cast<char*>(key_ptr) + key_length,
-                                     new_size);
-            WriteLock wl(GetLock(lkey.user_key()));
-            memcpy(p, value.data(), value.size());
-            assert((unsigned)((p + value.size()) - entry) ==
-                   (unsigned)(VarintLength(key_length) + key_length +
-                              VarintLength(value.size()) + value.size()));
-            return;
-          }
+        // Update value, if new value size  <= previous value size
+        if (new_size <= prev_size) {
+          char* p =
+              EncodeVarint32(const_cast<char*>(key_ptr) + key_length, new_size);
+          WriteLock wl(GetLock(lkey.user_key()));
+          memcpy(p, value.data(), value.size());
+          assert((unsigned)((p + value.size()) - entry) ==
+                 (unsigned)(VarintLength(key_length) + key_length +
+                            VarintLength(value.size()) + value.size()));
+          return;
         }
-        default:
-          // If the latest value is kTypeDeletion, kTypeMerge or kTypeLogData
-          // we don't have enough space for update inplace
-            Add(seq, kTypeValue, key, value);
-            return;
       }
     }
   }

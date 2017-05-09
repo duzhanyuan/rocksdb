@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 
 #ifndef GFLAGS
 #include <cstdio>
@@ -13,18 +15,18 @@ int main() {
 
 #include <gflags/gflags.h>
 
+#include "db/db_impl.h"
+#include "db/dbformat.h"
+#include "monitoring/histogram.h"
 #include "rocksdb/db.h"
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/table.h"
-#include "db/db_impl.h"
-#include "db/dbformat.h"
 #include "table/block_based_table_factory.h"
+#include "table/get_context.h"
 #include "table/internal_iterator.h"
 #include "table/plain_table_factory.h"
 #include "table/table_builder.h"
-#include "table/get_context.h"
 #include "util/file_reader_writer.h"
-#include "util/histogram.h"
 #include "util/testharness.h"
 #include "util/testutil.h"
 
@@ -94,13 +96,14 @@ void TableReaderBenchmark(Options& opts, EnvOptions& env_options,
         int_tbl_prop_collector_factories;
 
     file_writer.reset(new WritableFileWriter(std::move(file), env_options));
-
+    int unknown_level = -1;
     tb = opts.table_factory->NewTableBuilder(
         TableBuilderOptions(ioptions, ikc, &int_tbl_prop_collector_factories,
                             CompressionType::kNoCompression,
                             CompressionOptions(),
                             nullptr /* compression_dict */,
-                            false /* skip_filters */, kDefaultColumnFamilyName),
+                            false /* skip_filters */, kDefaultColumnFamilyName,
+                            unknown_level),
         0 /* column_family_id */, file_writer.get());
   } else {
     s = DB::Open(opts, dbname, &db);
@@ -165,12 +168,14 @@ void TableReaderBenchmark(Options& opts, EnvOptions& env_options,
           std::string key = MakeKey(r1, r2, through_db);
           uint64_t start_time = Now(env, measured_by_nanosecond);
           if (!through_db) {
-            std::string value;
+            PinnableSlice value;
             MergeContext merge_context;
-            GetContext get_context(ioptions.comparator, ioptions.merge_operator,
-                                   ioptions.info_log, ioptions.statistics,
-                                   GetContext::kNotFound, Slice(key), &value,
-                                   nullptr, &merge_context, env);
+            RangeDelAggregator range_del_agg(ikc, {} /* snapshots */);
+            GetContext get_context(ioptions.user_comparator,
+                                   ioptions.merge_operator, ioptions.info_log,
+                                   ioptions.statistics, GetContext::kNotFound,
+                                   Slice(key), &value, nullptr, &merge_context,
+                                   &range_del_agg, env);
             s = table_reader->Get(read_options, key, &get_context);
           } else {
             s = db->Get(read_options, key, &result);

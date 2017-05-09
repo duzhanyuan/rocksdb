@@ -18,6 +18,7 @@ typedef std::unordered_map<std::string, std::shared_ptr<const TableProperties>>
     TablePropertiesCollection;
 
 class DB;
+class ColumnFamilyHandle;
 class Status;
 struct CompactionJobStats;
 enum CompressionType : unsigned char;
@@ -68,6 +69,8 @@ enum class CompactionReason {
   kUniversalSortedRunNum,
   // [FIFO] total size > max_table_files_size
   kFIFOMaxSize,
+  // [FIFO] reduce number of files.
+  kFIFOReduceNumFiles,
   // Manual compaction
   kManualCompaction,
   // DB::SuggestCompactRange() marked files for compaction
@@ -169,6 +172,42 @@ struct MemTableInfo {
 
 };
 
+struct ExternalFileIngestionInfo {
+  // the name of the column family
+  std::string cf_name;
+  // Path of the file outside the DB
+  std::string external_file_path;
+  // Path of the file inside the DB
+  std::string internal_file_path;
+  // The global sequence number assigned to keys in this file
+  SequenceNumber global_seqno;
+  // Table properties of the table being flushed
+  TableProperties table_properties;
+};
+
+// A call-back function to RocksDB which will be called when the compaction
+// iterator is compacting values. It is mean to be returned from
+// EventListner::GetCompactionEventListner() at the beginning of compaction
+// job.
+class CompactionEventListener {
+ public:
+  enum CompactionListenerValueType {
+    kValue,
+    kMergeOperand,
+    kDelete,
+    kSingleDelete,
+    kRangeDelete,
+    kInvalid,
+  };
+
+  virtual void OnCompaction(int level, const Slice& key,
+                            CompactionListenerValueType value_type,
+                            const Slice& existing_value,
+                            const SequenceNumber& sn, bool is_new) = 0;
+
+  virtual ~CompactionEventListener() = default;
+};
+
 // EventListener class contains a set of call-back functions that will
 // be called when specific RocksDB event happens such as flush.  It can
 // be used as a building block for developing custom features such as
@@ -209,6 +248,16 @@ class EventListener {
   // returns.  Otherwise, RocksDB may be blocked.
   virtual void OnFlushCompleted(DB* /*db*/,
                                 const FlushJobInfo& /*flush_job_info*/) {}
+
+  // A call-back function to RocksDB which will be called before a
+  // RocksDB starts to flush memtables.  The default implementation is
+  // no-op.
+  //
+  // Note that the this function must be implemented in a way such that
+  // it should not run for an extended period of time before the function
+  // returns.  Otherwise, RocksDB may be blocked.
+  virtual void OnFlushBegin(DB* /*db*/,
+                            const FlushJobInfo& /*flush_job_info*/) {}
 
   // A call-back function for RocksDB which will be called whenever
   // a SST file is deleted.  Different from OnCompactionCompleted and
@@ -265,7 +314,7 @@ class EventListener {
   // returned value.
   virtual void OnTableFileCreationStarted(
       const TableFileCreationBriefInfo& /*info*/) {}
- 
+
   // A call-back function for RocksDB which will be called before
   // a memtable is made immutable.
   //
@@ -278,6 +327,32 @@ class EventListener {
   // returned value.
   virtual void OnMemTableSealed(
     const MemTableInfo& /*info*/) {}
+
+  // A call-back function for RocksDB which will be called before
+  // a column family handle is deleted.
+  //
+  // Note that the this function must be implemented in a way such that
+  // it should not run for an extended period of time before the function
+  // returns.  Otherwise, RocksDB may be blocked.
+  // @param handle is a pointer to the column family handle to be deleted
+  // which will become a dangling pointer after the deletion.
+  virtual void OnColumnFamilyHandleDeletionStarted(ColumnFamilyHandle* handle) {
+  }
+
+  // A call-back function for RocksDB which will be called after an external
+  // file is ingested using IngestExternalFile.
+  //
+  // Note that the this function will run on the same thread as
+  // IngestExternalFile(), if this function is blocked, IngestExternalFile()
+  // will be blocked from finishing.
+  virtual void OnExternalFileIngested(
+      DB* /*db*/, const ExternalFileIngestionInfo& /*info*/) {}
+
+  // Factory method to return CompactionEventListener. If multiple listeners
+  // provides CompactionEventListner, only the first one will be used.
+  virtual CompactionEventListener* GetCompactionEventListener() {
+    return nullptr;
+  }
 
   virtual ~EventListener() {}
 };

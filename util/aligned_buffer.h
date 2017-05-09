@@ -2,6 +2,8 @@
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is also licensed under the GPLv2 license found in the
+//  COPYING file in the root directory of this source tree.
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -24,7 +26,7 @@ inline size_t Roundup(size_t x, size_t y) {
 }
 
 // This class is to manage an aligned user
-// allocated buffer for unbuffered I/O purposes
+// allocated buffer for direct I/O purposes
 // though can be used for any purpose.
 class AlignedBuffer {
   size_t alignment_;
@@ -58,6 +60,14 @@ public:
 
   AlignedBuffer& operator=(const AlignedBuffer&) = delete;
 
+  static bool isAligned(const void* ptr, size_t alignment) {
+    return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
+  }
+
+  static bool isAligned(size_t n, size_t alignment) {
+    return n % alignment == 0;
+  }
+
   size_t Alignment() const {
     return alignment_;
   }
@@ -73,6 +83,8 @@ public:
   const char* BufferStart() const {
     return bufstart_;
   }
+
+  char* BufferStart() { return bufstart_; }
 
   void Clear() {
     cursize_ = 0;
@@ -115,7 +127,11 @@ public:
 
   size_t Read(char* dest, size_t offset, size_t read_size) const {
     assert(offset < cursize_);
-    size_t to_read = std::min(cursize_ - offset, read_size);
+
+    size_t to_read = 0;
+    if(offset < cursize_) {
+      to_read = std::min(cursize_ - offset, read_size);
+    }
     if (to_read > 0) {
       memcpy(dest, bufstart_ + offset, to_read);
     }
