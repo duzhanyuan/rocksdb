@@ -238,9 +238,11 @@ Status WinEnvIO::NewRandomAccessFile(const std::string& fname,
   return s;
 }
 
-Status WinEnvIO::NewWritableFile(const std::string& fname,
-                                 std::unique_ptr<WritableFile>* result,
-                                 const EnvOptions& options) {
+Status WinEnvIO::OpenWritableFile(const std::string& fname,
+  std::unique_ptr<WritableFile>* result,
+  const EnvOptions& options,
+  bool reopen) {
+
   const size_t c_BufferCapacity = 64 * 1024;
 
   EnvOptions local_options(options);
@@ -264,10 +266,17 @@ Status WinEnvIO::NewWritableFile(const std::string& fname,
 
   if (local_options.use_mmap_writes) {
     desired_access |= GENERIC_READ;
-  } else {
+  }
+  else {
     // Adding this solely for tests to pass (fault_injection_test,
     // wal_manager_test).
     shared_mode |= (FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+  }
+
+  // This will always truncate the file
+  DWORD creation_disposition = CREATE_ALWAYS;
+  if (reopen) {
+    creation_disposition = OPEN_ALWAYS;
   }
 
   HANDLE hFile = 0;
@@ -278,7 +287,7 @@ Status WinEnvIO::NewWritableFile(const std::string& fname,
       desired_access,  // Access desired
       shared_mode,
       NULL,           // Security attributes
-      CREATE_ALWAYS,  // Posix env says O_CREAT | O_RDWR | O_TRUNC
+      creation_disposition,  // Posix env says (reopen) ? (O_CREATE | O_APPEND) : O_CREAT | O_TRUNC
       fileFlags,      // Flags
       NULL);          // Template File
   }
@@ -287,6 +296,18 @@ Status WinEnvIO::NewWritableFile(const std::string& fname,
     auto lastError = GetLastError();
     return IOErrorFromWindowsError(
       "Failed to create a NewWriteableFile: " + fname, lastError);
+  }
+
+  // We will start writing at the end, appending
+  if (reopen) {
+    LARGE_INTEGER zero_move;
+    zero_move.QuadPart = 0;
+    BOOL ret = SetFilePointerEx(hFile, zero_move, NULL, FILE_END);
+    if (!ret) {
+      auto lastError = GetLastError();
+      return IOErrorFromWindowsError(
+        "Failed to create a ReopenWritableFile move to the end: " + fname, lastError);
+    }
   }
 
   if (options.use_mmap_writes) {
@@ -304,7 +325,7 @@ Status WinEnvIO::NewWritableFile(const std::string& fname,
 }
 
 Status WinEnvIO::NewRandomRWFile(const std::string & fname,
-  unique_ptr<RandomRWFile>* result, const EnvOptions & options) {
+  std::unique_ptr<RandomRWFile>* result, const EnvOptions & options) {
 
   Status s;
 
@@ -879,6 +900,11 @@ void WinEnvThreads::SetBackgroundThreads(int num, Env::Priority pri) {
   thread_pools_[pri].SetBackgroundThreads(num);
 }
 
+int WinEnvThreads::GetBackgroundThreads(Env::Priority pri) {
+  assert(pri >= Env::Priority::LOW && pri <= Env::Priority::HIGH);
+  return thread_pools_[pri].GetBackgroundThreads();
+}
+
 void WinEnvThreads::IncBackgroundThreadsIfNeeded(int num, Env::Priority pri) {
   assert(pri >= Env::Priority::LOW && pri <= Env::Priority::HIGH);
   thread_pools_[pri].IncBackgroundThreadsIfNeeded(num);
@@ -928,7 +954,12 @@ Status WinEnv::NewRandomAccessFile(const std::string& fname,
 Status WinEnv::NewWritableFile(const std::string& fname,
                                std::unique_ptr<WritableFile>* result,
                                const EnvOptions& options) {
-  return winenv_io_.NewWritableFile(fname, result, options);
+  return winenv_io_.OpenWritableFile(fname, result, options, false);
+}
+
+Status WinEnv::ReopenWritableFile(const std::string& fname,
+    std::unique_ptr<WritableFile>* result, const EnvOptions& options) {
+  return winenv_io_.OpenWritableFile(fname, result, options, true);
 }
 
 Status WinEnv::NewRandomRWFile(const std::string & fname,
@@ -1056,6 +1087,10 @@ void  WinEnv::SetBackgroundThreads(int num, Env::Priority pri) {
   return winenv_threads_.SetBackgroundThreads(num, pri);
 }
 
+int WinEnv::GetBackgroundThreads(Env::Priority pri) {
+  return winenv_threads_.GetBackgroundThreads(pri);
+}
+
 void  WinEnv::IncBackgroundThreadsIfNeeded(int num, Env::Priority pri) {
   return winenv_threads_.IncBackgroundThreadsIfNeeded(num, pri);
 }
@@ -1080,6 +1115,7 @@ std::string Env::GenerateUniqueId() {
 
   RPC_CSTR rpc_str;
   auto status = UuidToStringA(&uuid, &rpc_str);
+  (void)status;
   assert(status == RPC_S_OK);
 
   result = reinterpret_cast<char*>(rpc_str);

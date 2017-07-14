@@ -1154,7 +1154,7 @@ Status BackupEngineImpl::CopyOrCreateFile(
   unique_ptr<SequentialFile> src_file;
   EnvOptions env_options;
   env_options.use_mmap_writes = false;
-  // TODO:(gzh) maybe use direct writes here if possible
+  // TODO:(gzh) maybe use direct reads/writes here if possible
   if (size != nullptr) {
     *size = 0;
   }
@@ -1214,7 +1214,8 @@ Status BackupEngineImpl::CopyOrCreateFile(
     }
     s = dest_writer->Append(data);
     if (rate_limiter != nullptr) {
-      rate_limiter->Request(data.size(), Env::IO_LOW, nullptr /* stats */);
+      rate_limiter->Request(data.size(), Env::IO_LOW, nullptr /* stats */,
+                            RateLimiter::OpType::kWrite);
     }
     if (processed_buffer_size > options_.callback_trigger_interval_size) {
       processed_buffer_size -= options_.callback_trigger_interval_size;

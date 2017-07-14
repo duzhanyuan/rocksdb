@@ -13,22 +13,11 @@
 #define __STDC_FORMAT_MACROS
 #endif
 
-#include <inttypes.h>
-#include <cctype>
 #include <cstring>
-#include <unordered_map>
 
-#include "options/options_helper.h"
 #include "options/options_parser.h"
-#include "options/options_sanity_check.h"
-#include "rocksdb/cache.h"
 #include "rocksdb/convenience.h"
-#include "rocksdb/memtablerep.h"
-#include "rocksdb/utilities/leveldb_options.h"
-#include "util/random.h"
-#include "util/stderr_logger.h"
 #include "util/testharness.h"
-#include "util/testutil.h"
 
 #ifndef GFLAGS
 bool FLAGS_enable_print = false;
@@ -246,6 +235,7 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "table_cache_numshardbits=28;"
                              "max_open_files=72;"
                              "max_file_opening_threads=35;"
+                             "max_background_jobs=8;"
                              "base_background_compactions=3;"
                              "max_background_compactions=33;"
                              "use_fsync=true;"
@@ -281,6 +271,7 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "random_access_max_buffer_size=1048576;"
                              "advise_random_on_open=true;"
                              "fail_if_options_file_error=false;"
+                             "enable_pipelined_write=false;"
                              "allow_concurrent_memtable_write=true;"
                              "wal_recovery_mode=kPointInTimeRecovery;"
                              "enable_write_thread_adaptive_yield=true;"
@@ -291,7 +282,10 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "dump_malloc_stats=false;"
                              "allow_2pc=false;"
                              "avoid_flush_during_recovery=false;"
-                             "avoid_flush_during_shutdown=false;",
+                             "avoid_flush_during_shutdown=false;"
+                             "allow_ingest_behind=false;"
+                             "concurrent_prepare=false;"
+                             "manual_wal_flush=false;",
                              new_options));
 
   ASSERT_EQ(unset_bytes_base, NumUnsetBytes(new_options_ptr, sizeof(DBOptions),

@@ -49,14 +49,14 @@ class CuckooBuilderTest : public testing::Test {
     uint64_t read_file_size;
     ASSERT_OK(env_->GetFileSize(fname, &read_file_size));
 
-	Options options;
-	options.allow_mmap_reads = true;
-	ImmutableCFOptions ioptions(options);
+	  Options options;
+	  options.allow_mmap_reads = true;
+	  ImmutableCFOptions ioptions(options);
 
     // Assert Table Properties.
     TableProperties* props = nullptr;
     unique_ptr<RandomAccessFileReader> file_reader(
-        new RandomAccessFileReader(std::move(read_file)));
+        new RandomAccessFileReader(std::move(read_file), fname));
     ASSERT_OK(ReadTableProperties(file_reader.get(), read_file_size,
                                   kCuckooTableMagicNumber, ioptions,
                                   &props));
@@ -108,7 +108,7 @@ class CuckooBuilderTest : public testing::Test {
           std::find(expected_locations.begin(), expected_locations.end(), i) -
           expected_locations.begin();
       if (key_idx == keys.size()) {
-        // i is not one of the expected locaitons. Empty bucket.
+        // i is not one of the expected locations. Empty bucket.
         ASSERT_EQ(read_slice.compare(expected_unused_bucket), 0);
       } else {
         keys_found[key_idx] = true;

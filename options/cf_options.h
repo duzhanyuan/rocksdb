@@ -59,6 +59,8 @@ struct ImmutableCFOptions {
 
   Statistics* statistics;
 
+  RateLimiter* rate_limiter;
+
   InfoLogLevel info_log_level;
 
   Env* env;
@@ -107,6 +109,8 @@ struct ImmutableCFOptions {
   bool optimize_filters_for_hits;
 
   bool force_consistency_checks;
+
+  bool allow_ingest_behind;
 
   // A vector of EventListeners which call-back functions will be called
   // when specific RocksDB event happens.

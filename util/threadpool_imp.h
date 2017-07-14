@@ -30,7 +30,7 @@ class ThreadPoolImpl : public ThreadPool {
   // Implement ThreadPool interfaces
 
   // Wait for all threads to finish.
-  // Discards all the the jobs that did not
+  // Discards all the jobs that did not
   // start executing and waits for those running
   // to complete
   void JoinAllThreads() override;
@@ -38,6 +38,8 @@ class ThreadPoolImpl : public ThreadPool {
   // Set the number of background threads that will be executing the
   // scheduled jobs.
   void SetBackgroundThreads(int num) override;
+  int GetBackgroundThreads() override;
+
   // Get the number of jobs scheduled in the ThreadPool queue.
   unsigned int GetQueueLen() const override;
 
